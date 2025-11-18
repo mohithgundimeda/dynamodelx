@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dynamodelx"
+dynamic = ["version"]
+description = "Dynamic Models for ML with Uncertainty"
+dependencies = [
+  "torch>=2.2,<3.0",
+  "numpy>=1.22,<3.0",
+  "pyyaml>=6.0",
+  "scikit-learn>=1.3,<2.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/mohithgundimeda/dynamodelx.git"
+
+[project.optional-dependencies]
+plot = ["matplotlib"]
+
+[tools.hatch.version]
+source = "tag"
