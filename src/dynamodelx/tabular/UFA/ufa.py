@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
 from typing import Optional, Dict, Tuple
+from sklearn.metrics import confusion_matrix
 from ...utils.activations import validate_hidden_act, get_hidden_act, ActivationType
 from ...utils.optimizer import validate_optimizer, get_optimizer, OptimizerType
 from ...utils.weights_init import validate_weights_init, _init_weights, WeightInitType
@@ -10,6 +11,44 @@ from ...utils.custom_arch import validate_custom_arch
 from ...utils.loss import LossType, validate_loss
 from ...utils.metrics import get_metrics, PICP_MPIW
 from ...utils.data import X_to_torch, preprocess_y, process_predictions, process_y_true
+
+class TrainingHistory:
+    """
+    A structured history object for storing training/validation/test metrics.
+    """
+
+    def __init__(self, train=None, validation=None, test=None):
+        self.train = train or {}
+        self.validation = validation or {}
+        self.test = test or {}
+
+    def to_dict(self):
+        """
+        Convert the history object to a plain dictionary.
+        """
+        out = {
+            "train": self.train,
+            "validation": self.validation
+        }
+        if self.test:  
+            out["test"] = self.test
+        return out
+
+    @classmethod
+    def from_dict(cls, history: dict):
+        """
+        Create a TrainingHistory instance from a dict.
+        """
+        return cls(
+            train=history.get("train", {}),
+            validation=history.get("validation", {}),
+            test=history.get("test", {})
+        )
+
+    def __repr__(self):
+        return f"TrainingHistory(train={list(self.train.keys())}, validation={list(self.validation.keys())}, test={list(self.test.keys())})"
+
+        
 
 class UFA:
 
@@ -162,7 +201,7 @@ class UFA:
         """
         Print model's initialization summary after creating an instance
         """
-        print("Model Configuration:")
+        print("Model Configuration:\n")
         print(f"  Task:               {self.task}")
         print(f"  Model Size:         {self.model_size or 'Custom'}")
         print(f"  Input Dimension:    {self.input_dim}")
@@ -174,7 +213,7 @@ class UFA:
         print(f"  Weights Init:       {self.weights_init or 'Default'}")
         print(f"  Uncertainty:        {self.uncertainty}")
         print(f"  Multiclass:         {self.multiclass}")
-        print(f"  Custom Architecture:{self.custom_architecture}")
+        print(f"  Custom Architecture:{self.custom_architecture}\n")
 
     def model_info(self) -> None:
         """
@@ -207,7 +246,7 @@ class UFA:
         self.summary()
 
         if self.auto_build:
-            print(f"Building the model ...")
+            print("Building the model ...")
             self.build()
             self.model_info()
 
@@ -222,6 +261,9 @@ class UFA:
         """
         Builds the dynamic model for given specification
         """
+        if not self.auto_build:
+            print("Building the model ...")
+            
         architecture = self.ARCHITECTURE_MAP[self.model_size] if self.model_size else self.custom_architecture
         
         layers = []
@@ -235,6 +277,9 @@ class UFA:
         self.model = torch.nn.Sequential(*layers).to(self.device)
 
         _init_weights(self.model, self.weights_init)
+        
+        if not self.auto_build:
+            self.model_info()
 
     def preprocess_user_data(self, X: np.ndarray, y: np.ndarray, val_size, test_size, batch_size) -> tuple[DataLoader, DataLoader, DataLoader]:
             
@@ -246,6 +291,13 @@ class UFA:
                              uncertainty=self.uncertainty,
                              )
 
+            if X.shape[0] != y.shape[0]:
+                raise ValueError(f"Number of samples in X ({X.shape[0]}) and y ({y.shape[0]}) do not match.")
+            
+            if X.shape[0] == 0:
+                raise RuntimeError("Empty dataset provided.")
+
+            
             self.X_mean = X.mean(dim=0)
             self.X_std = X.std(dim=0)
             
@@ -254,9 +306,6 @@ class UFA:
             X = (X - self.X_mean) / self.X_std
 
             n_samples = X.shape[0]
-            if n_samples == 0:
-                raise RuntimeError("Empty dataset provided (n_samples == 0).")
-            
             idx = torch.randperm(n_samples)
 
             n_test = int(n_samples * test_size)
@@ -295,7 +344,7 @@ class UFA:
             y:  np.ndarray,
             epochs : int,
             learning_rate : float,
-            momentum : float | None = None,
+            momentum : Optional[float]= None,
             val_size : float = 0.2,
             test_size : float = 0.1,
             batch_size : int = 32
@@ -322,10 +371,20 @@ class UFA:
         if val_size + test_size >= 1.0:
             raise ValueError("Sum of val_size and test_size must be < 1.0")
 
-        if (not isinstance(batch_size, int)) or (batch_size <= 0):
-            raise TypeError(
-                f'Expected batch_size to be an integer greater than 0'
+        if not isinstance(batch_size, int):
+            raise TypeError("batch_size must be an integer")
+        
+        if batch_size <= 0:
+            raise ValueError("batch_size must be greater than 0")
+        
+        if batch_size > X.shape[0]:
+            import warnings
+            warnings.warn(
+                f"batch_size ({batch_size}) is larger than the dataset size ({X.shape[0]}). "
+                "It will be reduced to dataset size."
             )
+            batch_size = X.shape[0]
+
         
         
         train_loader, val_loader, test_loader = self.preprocess_user_data(
@@ -434,8 +493,8 @@ class UFA:
 
             if (epoch+1) == epochs:
                 print(
-                    f"Final average train loss for a sample : {avg_train_loss_per_sample}\n",
-                    f"Final average validation loss for a sample : {avg_val_loss_per_sample}\n"
+                    f"Average train loss per sample : {avg_train_loss_per_sample}",
+                    f"\nAverage validation loss per sample : {avg_val_loss_per_sample}"
                 )
 
         test_loss = 0
@@ -503,24 +562,27 @@ class UFA:
         if self.uncertainty:
             picp_values, mpiw_values = PICP_MPIW(y_test_pred_concat, y_test_var_concat, y_test_true_concat)
             for i, cl in enumerate(np.linspace(0.10, 0.90, 9)):
-                print(f"For {cl*100:.0f}% Confidence Level --> PICP: {picp_values[i]:.4f}, MPIW: {mpiw_values[i]:.4f}\n")
+                print(f"\nFor {cl*100:.0f}% Confidence Level --> PICP: {picp_values[i]:.4f}, MPIW: {mpiw_values[i]:.4f}")
 
         print(
-            f"\nFinal Test Loss per sample: {avg_test_loss}\n"
+            f"\nAverage test loss per sample: {avg_test_loss}"
             )
+        
+        if self.task == 'classification':
+            print("Confusion matrix on test data: \n", confusion_matrix(y_test_true_concat, y_test_pred_concat))
 
         
         if self.return_metrics:
-            output_dict = {
-                            'train': {'train_loss' : train_loss_track,},
-                            'validation' : {'validation_loss' : val_loss_track, **metrics_tracking,},
-                            'test' : {**test_metrics}
-                        }
+            output_dict = TrainingHistory(
+                            train = {'train_loss' : train_loss_track,},
+                            validation = {'validation_loss' : val_loss_track, **metrics_tracking,},
+                            test = {**test_metrics}
+                        )
         else:
-            output_dict = {
-                            'train': {'train_loss' : train_loss_track},
-                            'validation' : {'validation_loss' : val_loss_track}
-                        }
+            output_dict = TrainingHistory(
+                            train = {'train_loss' : train_loss_track},
+                            validation = {'validation_loss' : val_loss_track}
+                        )
 
         return output_dict
         
@@ -552,12 +614,12 @@ class UFA:
         if self.uncertainty:
 
             mean , raw_var = torch.chunk(output, 2, dim=1)
-            std = torch.sqrt(torch.nn.functional.softplus(raw_var).clamp(min=1e-6, max=1e2))
+            var = torch.nn.functional.softplus(raw_var).clamp(min=1e-6, max=1e2)
             
             mean = mean.squeeze(-1) if mean.ndim ==2 and mean.shape[1] ==1 else mean
-            std = std.squeeze(-1) if std.ndim ==2 and std.shape[1] ==1 else std
+            var = var.squeeze(-1) if var.ndim ==2 and var.shape[1] ==1 else var
 
-            return np.hstack([mean.cpu().numpy(), std.cpu().numpy()])
+            return mean.cpu().numpy(), var.cpu().numpy()
 
 
         preds = process_predictions(
@@ -575,7 +637,7 @@ class UFA:
 
             
 
-    def save_model(self, path: str) -> None:
+    def save(self, path: str) -> None:
         """
         Save the trained model weights (state_dict) to a file.
 

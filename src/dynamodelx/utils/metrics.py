@@ -1,10 +1,8 @@
 from sklearn.metrics import (
     mean_absolute_error, r2_score,
-    accuracy_score, precision_score, recall_score, f1_score
+    accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 )
-import numpy as np
 import torch
-from typing import Tuple, List
 
 reg_metrics_map = {
     "mae": mean_absolute_error,
@@ -28,7 +26,7 @@ def make_classification_metrics(multiclass: bool = False):
         ),
         "f1": lambda y_true, y_pred: f1_score(
             y_true, y_pred, average=avg, zero_division=0
-        ),
+        )
     }
 
 

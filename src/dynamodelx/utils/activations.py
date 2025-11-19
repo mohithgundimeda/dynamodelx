@@ -7,6 +7,7 @@ HIDDEN_ACT_MAP: Dict[str, Type[torch.nn.Module]] = {
     "prelu": torch.nn.PReLU,
     "elu": torch.nn.ELU,
     "tanh": torch.nn.Tanh,
+    "sigmoid" : torch.nn.Sigmoid,
     "gelu": torch.nn.GELU,
     "mish": torch.nn.Mish,
 }
@@ -17,6 +18,7 @@ ActivationType = Literal[
     "prelu",
     "elu",
     "tanh",
+    "sigmoid",
     "gelu",
     "mish",
 ]

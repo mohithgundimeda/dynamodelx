@@ -1,4 +1,3 @@
-import torch
 from typing import Optional
 
 def validate_custom_arch(arch: Optional[list[int]]) -> Optional[list[int]]:
