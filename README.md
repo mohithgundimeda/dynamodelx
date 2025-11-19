@@ -161,11 +161,11 @@ ufa.save('model_name.pth')
 This method takes the file name (with .pth, .pt, .ckpt, .bin extensions) as input and saves the trained model in the current working directory.
 
 ## Examples
-More examples can be found in the __examples__ folder of the repository.
+More examples can be found in the [__examples__ ](https://github.com/mohithgundimeda/dynamodelx/tree/main/examples "examples") folder of the repository.
 
 ## License
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see the [__LICENSE__](https://github.com/mohithgundimeda/dynamodelx/blob/main/LICENSE "LICENSE") file for details.
 
 ## Acknowledgements
-* Built on top of PyTorch - https://pytorch.org/
+* Built on top of [__PyTorch__](https://pytorch.org/ "pytorch.org")
 * Inspired by various machine learning libraries and frameworks.

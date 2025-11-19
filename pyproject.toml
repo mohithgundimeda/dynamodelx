@@ -25,5 +25,5 @@ Homepage = "https://github.com/mohithgundimeda/dynamodelx.git"
 [project.optional-dependencies]
 plot = ["matplotlib"]
 
-[tools.hatch.version]
-source = "tag"
+[tool.hatch.version]
+source = "vcs"
