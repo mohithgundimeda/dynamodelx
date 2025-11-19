@@ -8,9 +8,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dynamodelx"
+
 dynamic = ["version"]
+
 description = "Dynamic Models for ML with Uncertainty"
 readme = "README.md"
+
 authors = [
     { name="Mohith Gundimeda", email="mohithgundemeda@gmail.com" }
 ]
