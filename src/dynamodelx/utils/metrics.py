@@ -46,29 +46,29 @@ def get_metrics(task : str, multiclass: bool) -> dict:
     return reg_metrics_map
 
 
-def PICP_MPIW(y_pred, y_var, y_true):
+def PICP_MPIW(y_pred, y_std, y_true):
+
     confidence_levels = torch.linspace(0.10, 0.90, 9)
 
-    y_pred_t = torch.from_numpy(y_pred).float().reshape(-1)
-    y_var_t  = torch.from_numpy(y_var).float().reshape(-1)
-    y_true_t = torch.from_numpy(y_true).float().reshape(-1)
-
-    std_t = torch.sqrt(torch.nn.functional.softplus(y_var_t).clamp(min=1e-6))
+    y_pred_t = torch.tensor(y_pred, dtype=torch.float32)
+    y_std_t  = torch.tensor(y_std, dtype=torch.float32)
+    y_true_t = torch.tensor(y_true, dtype=torch.float32)
 
     picp_list, mpiw_list = [], []
 
-    sqrt2 = torch.sqrt(torch.tensor(2.0))
+    for ci in confidence_levels:
+        alpha = (1 + ci) / 2.0
+        z_val = torch.sqrt(torch.tensor(2.0)) * torch.erfinv(2 * alpha - 1)
 
-    for p in confidence_levels:
-        p = torch.clamp(p, 1e-6, 1 - 1e-6)
-
-        z_val = torch.abs(sqrt2 * torch.erfinv(2 * p - 1))
-
-        lower = y_pred_t - z_val * std_t
-        upper = y_pred_t + z_val * std_t
-
-        picp = ((y_true_t >= lower) & (y_true_t <= upper)).float().mean().item()
-        mpiw = (upper - lower).mean().item()
+        lower = y_pred_t - z_val * y_std_t
+        upper = y_pred_t + z_val * y_std_t
+        
+        if lower.ndim == 1:
+            picp = ((y_true_t >= lower) & (y_true_t <= upper)).float().mean().item()
+            mpiw = (upper - lower).mean().item()
+        else:
+            picp = ((y_true_t >= lower) & (y_true_t <= upper)).float().mean(dim=0).tolist()
+            mpiw = (upper - lower).mean(dim=0).tolist()
 
         picp_list.append(picp)
         mpiw_list.append(mpiw)

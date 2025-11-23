@@ -69,6 +69,12 @@ ufa.save(path='california_housing.pth')
 
 ```
 
+__Functions__ in __UFA__:
+* __build__ - to build the model architecture according to the user specifications.
+* __train__ - to train the model on the given dataset.
+* __predict__ - to make predictions on new data. Returns prediction, or prediction and standard-deviation (if uncertainty=True).
+* __save__ - to save the trained model to the disk.
+
 The hyperparameters for this estimator to initialize __UFA__ are as follows:
 
 * **task** represents the kind of task we are performing, it takes a string. Either __'regression'__ or __'classification'__.
@@ -110,11 +116,11 @@ The hyperparameters for this estimator to initialize __UFA__ are as follows:
     * **'adamw'** - AdamW optimizer.
     * **'sgd'** - Stochastic Gradient Descent optimizer.
     * By default, it's set to **'adam'**.
-* **uncertainty** takes a boolean value, True if we want to perform regression with uncertainty (heteroscedastic regression), False otherwise. By default, it's set to False. If it's set to True, the loss function should be __'gaussian_nll_loss'__ and the model will output both prediction and variance for each input sample. Note,
+* **uncertainty** takes a boolean value, True if we want to perform regression with uncertainty (heteroscedastic regression), False otherwise. By default, it's set to False. If it's set to True, the loss function should be __'gaussian_nll_loss'__ and the model will output both prediction and standard-deviation for each input sample. Note,
     * Making **uncertainty** True will work only when the **task** is set to __'regression'__.
     * Model also shows PICP and MPIW metrics for test data
-    * For multi-target heteroscedastic regression, the model will output both prediction and variance for each target variable.
-    * We don't have to include variance as a separate output dimension, the model will automatically takes care of it. If the **output_dim** is set to __d__, the model will output __d__ predictions and __d__ variance values.
+    * For multi-target heteroscedastic regression, the model will output both prediction and standard-deviation for each target variable.
+    * We don't have to include standard-deviation as a separate output dimension, the model will automatically takes care of it. If the **output_dim** is set to __d__, the model will output __d__ predictions and __d__ standard-deviation values.
 * **multiclass** takes a boolean value, True if we want to perform multi-class classification, False otherwise. By default, it's set to False. If it's set to True, the **output_dim** should be greater than 1 and the loss function should be __'cross_entropy_loss'__. Note, making **multiclass** True will work only when the **task** is set to __'classification'__.
 * **custom_architecture** takes a list of integers, representing the number of neurons in each hidden layer. For example, [128, 64, 32] represents a model with 3 hidden layers with 128, 64 and 32 neurons respectively. By default, it's set to __None__. If it's set to None, the model will be built according to the **model_size** parameter. If we want to use our own custom architecture, we need to set the **model_size** parameter to __None__ and provide the architecture through this parameter. Note this is only for hidden layers and the length of the list should be at least 1 and all the values should be positive integers greater than 0. The output layer neurons are defined by the **output_dim** parameter, no need to mention it here.
 * **return_metrics** takes a boolean value, True if we want to return performance metrics after training, False otherwise. By default, it's set to True. If it's set to True, the __train__ method will return a dictionary of type **TrainingHistory** containing training loss, validation and test losses and their metrics.

@@ -11,45 +11,8 @@ from ...utils.custom_arch import validate_custom_arch
 from ...utils.loss import LossType, validate_loss
 from ...utils.metrics import get_metrics, PICP_MPIW
 from ...utils.data import X_to_torch, preprocess_y, process_predictions, process_y_true
-
-class TrainingHistory:
-    """
-    A structured history object for storing training/validation/test metrics.
-    """
-
-    def __init__(self, train=None, validation=None, test=None):
-        self.train = train or {}
-        self.validation = validation or {}
-        self.test = test or {}
-
-    def to_dict(self):
-        """
-        Convert the history object to a plain dictionary.
-        """
-        out = {
-            "train": self.train,
-            "validation": self.validation
-        }
-        if self.test:  
-            out["test"] = self.test
-        return out
-
-    @classmethod
-    def from_dict(cls, history: dict):
-        """
-        Create a TrainingHistory instance from a dict.
-        """
-        return cls(
-            train=history.get("train", {}),
-            validation=history.get("validation", {}),
-            test=history.get("test", {})
-        )
-
-    def __repr__(self):
-        return f"TrainingHistory(train={list(self.train.keys())}, validation={list(self.validation.keys())}, test={list(self.test.keys())})"
-
+from ...utils.TrainingHistory import TrainingHistory
         
-
 class UFA:
 
     ARCHITECTURE_MAP : Dict[str, Tuple]= {
@@ -119,6 +82,9 @@ class UFA:
         
         if not isinstance(self.return_metrics, bool):
             raise TypeError(f'Expected return_metrics to be either True or False')
+        
+        if not isinstance(self.auto_build, bool):
+            raise TypeError(f'Expected auto_build to be either True or False')
     
     def _validate_model_ingredients(self) -> None:
         """
@@ -501,7 +467,7 @@ class UFA:
         test_samples = 0
         y_test_pred_concat = []
         y_test_true_concat = []
-        y_test_var_concat = []
+        y_test_rho_concat = []
         self.model.eval()
         with torch.no_grad():
             for X_test_batch, y_test_batch in test_loader:
@@ -515,8 +481,8 @@ class UFA:
                 y_test_pred = self.model(X_test_batch)
                 
                 if self.uncertainty:
-                    _ , raw_var = torch.chunk(y_test_pred, 2, dim=1)
-                    y_test_var_concat.append(raw_var.cpu().numpy())
+                    _ , rho = torch.chunk(y_test_pred, 2, dim=1)
+                    y_test_rho_concat.append(rho.cpu().numpy())
                 
                 loss_test = self.loss_function(y_test_pred, y_test_batch)
 
@@ -545,7 +511,7 @@ class UFA:
         y_test_true_concat = np.concatenate(y_test_true_concat, axis=0)
         
         if self.uncertainty:
-            y_test_var_concat = np.concatenate(y_test_var_concat, axis=0)
+            y_test_rho_concat = np.concatenate(y_test_rho_concat, axis=0)
 
         assert (
             y_test_pred_concat.shape == y_test_true_concat.shape
@@ -559,10 +525,19 @@ class UFA:
                 for metric_name, func in self.metrics.items()
             }
         
-        if self.uncertainty:
-            picp_values, mpiw_values = PICP_MPIW(y_test_pred_concat, y_test_var_concat, y_test_true_concat)
-            for i, cl in enumerate(np.linspace(0.10, 0.90, 9)):
+        y_test_std_concat = torch.nn.functional.softplus(y_test_rho_concat).clamp(min=1e-6)
+        
+        picp_values, mpiw_values = PICP_MPIW(y_test_pred_concat, y_test_std_concat, y_test_true_concat)
+
+        confidence_levels = np.linspace(0.10, 0.90, 9)
+
+        for i, cl in enumerate(confidence_levels):
+            if self.output_dim == 1:
                 print(f"\nFor {cl*100:.0f}% Confidence Level --> PICP: {picp_values[i]:.4f}, MPIW: {mpiw_values[i]:.4f}")
+            else:
+                picp_str = ", ".join([f"{v:.4f}" for v in picp_values[i]])
+                mpiw_str = ", ".join([f"{v:.4f}" for v in mpiw_values[i]])
+                print(f"\nFor {cl*100:.0f}% Confidence Level --> PICP: [{picp_str}], MPIW: [{mpiw_str}]")
 
         print(
             f"\nAverage test loss per sample: {avg_test_loss}"
@@ -613,13 +588,13 @@ class UFA:
 
         if self.uncertainty:
 
-            mean , raw_var = torch.chunk(output, 2, dim=1)
-            var = torch.nn.functional.softplus(raw_var).clamp(min=1e-6, max=1e2)
+            mean , rho = torch.chunk(output, 2, dim=1)
+            std = torch.nn.functional.softplus(rho).clamp(min=1e-6, max=1e2)
             
             mean = mean.squeeze(-1) if mean.ndim ==2 and mean.shape[1] ==1 else mean
-            var = var.squeeze(-1) if var.ndim ==2 and var.shape[1] ==1 else var
+            std = std.squeeze(-1) if std.ndim ==2 and std.shape[1] ==1 else std
 
-            return mean.cpu().numpy(), var.cpu().numpy()
+            return mean.cpu().numpy(), std.cpu().numpy()
 
 
         preds = process_predictions(
