@@ -8,7 +8,7 @@ def X_to_torch(X: np.ndarray | list | torch.Tensor | tuple, input_dim : int) -> 
     """
     if not isinstance(X, (torch.Tensor, np.ndarray, list, tuple)):
         raise TypeError("Input must be a torch.Tensor, numpy.ndarray, or list/tuple.")
-
+    
     if isinstance(X, torch.Tensor):
         if not torch.is_floating_point(X):
             X = X.float()
@@ -17,9 +17,12 @@ def X_to_torch(X: np.ndarray | list | torch.Tensor | tuple, input_dim : int) -> 
 
     if X.ndim > 2:
         raise  ValueError(f"Expected X to have at most 2 dimensions, but got {X.ndim}.")
+
+    if X.ndim == 1 :
+        X = X.reshape(-1,1)
     
     if X.shape[1] != input_dim:
-        raise ValueError(
+        raise RuntimeError(
             f"Model expects input dimension of {input_dim} but recieved {X.shape[1]}"
         )
     
@@ -45,64 +48,60 @@ def preprocess_y(
             torch.Tensor:
                 Properly shaped and typed tensor for model training.
             """
-
+            if not isinstance(y, (torch.Tensor, np.ndarray, list, tuple)):
+                raise TypeError("Input must be a torch.Tensor, numpy.ndarray, or list/tuple.")
+            
             if not isinstance(y, (np.ndarray, torch.Tensor)):
                 y = np.array(y)
+            
 
             if task == "classification":
-
-                unique_labels = np.unique(y)
-
                 if not multiclass:
-                    if set(unique_labels) != {0, 1}:
-                        raise ValueError(
-                            f"For binary classification, expected labels {{0,1}}, got {unique_labels.tolist()}"
-                        )
+                    unique = np.unique(y)
+                    if not set(unique).issubset({0, 1}):
+                        raise ValueError(f"Binary classification expects labels {{0, 1}}, got {unique.tolist()}")
 
                     if y.ndim == 1:
-                        y = np.expand_dims(y, axis=1)
-                    elif y.ndim != 2:
-                        raise ValueError(
-                            f"Binary classification expects y 1D or 2D, got shape {y.shape}"
-                        )
+                        y = y.reshape(-1, 1)
+                    elif y.ndim != 2 or y.shape[1] != 1:
+                        raise ValueError(f"Binary y must be 1D or (N,1), got shape {y.shape}")
 
                     y = torch.as_tensor(y, dtype=torch.float32)
 
                 else:
+                    unique = np.unique(y)
                     expected = list(range(output_dim))
-
-                    if not np.array_equal(unique_labels, expected):
+                    if not np.array_equal(unique, expected):
                         raise ValueError(
-                            f"For multiclass classification with output_dim={output_dim}, "
-                            f"expected labels {expected}, but got {unique_labels.tolist()}"
+                            f"Multiclass needs labels {expected}, got {unique.tolist()}"
                         )
 
+                    
                     if isinstance(y, np.ndarray):
                         if not np.issubdtype(y.dtype, np.integer):
-                            raise ValueError(
-                                f"Multiclass classification requires integer labels. Got dtype {y.dtype}"
-                            )
-                            
-                    elif isinstance(y, torch.Tensor):
+                            raise ValueError(f"Multiclass labels must be integers, got {y.dtype}")
+                    else:
                         if y.dtype not in (torch.int16, torch.int32, torch.int64):
-                            raise ValueError(
-                                f"Multiclass classification requires int tensor labels. Got dtype {y.dtype}"
-                            )
+                            raise ValueError(f"Multiclass labels must be int tensor, got {y.dtype}")
 
                     if y.ndim != 1:
-                        y = np.squeeze(y)
+                        raise ValueError(f"Multiclass y must be 1D, got shape {y.shape}")
 
                     y = torch.as_tensor(y, dtype=torch.long)
-
-
 
             elif task == "regression":
                 if uncertainty:
                     if y.ndim == 1:
+                        if output_dim != 1:
+                            raise RuntimeError(f'Expecting y to be a {output_dim} array/tensor. Suggesting to remove standard-deviation dimension from output_dim if it is included. As model will handle it automatically')
                         y = np.expand_dims(y, axis=1)
-                    elif y.ndim != 2 or y.shape[1] != output_dim:
+                    elif y.ndim != 2:
                         raise ValueError(
                             f"For uncertainty regression, expected y shape (N, {output_dim}), got {y.shape}."
+                        )
+                    elif y.shape[1] != output_dim:
+                        raise ValueError(
+                            f"For uncertainty regression, expected y shape (N, {output_dim}), got (N, {y.shape[1]}). Suggesting to remove standard-deviation dimension from output_dim if it is included. As model will handle it automatically"
                         )
                     y = torch.as_tensor(y, dtype=torch.float32)
 
@@ -111,12 +110,19 @@ def preprocess_y(
                         if y.ndim == 1:
                             y = np.expand_dims(y, axis=1)
                         elif y.ndim != 2:
-                            raise ValueError(f"Expected y to be 1D or 2D, got {y.shape}.")
+                            raise RuntimeError(f"Expected y to be 1D or 2D, got {y.shape}.")
+                        elif y.shape[1] != 1:
+                            raise RuntimeError(f'Expected y to have single dimension, but recieved {y.shape[1]}')
                     else:
                         if y.ndim == 1:
-                            raise ValueError(
+                            raise RuntimeError(
                                 f"Expected y shape (N, {output_dim}) for multi-output regression, got (N,)."
                             )
+                        elif y.ndim != 2:
+                            raise RuntimeError(f"Expected y to be 2D, got {y.shape}.")
+                        elif y.shape[1] != output_dim:
+                            raise RuntimeError(f'Expecting y to be a {output_dim} dimension array/tensor, but recieved {y.shape[1]}')
+                        
                     y = torch.as_tensor(y, dtype=torch.float32)
 
             else:

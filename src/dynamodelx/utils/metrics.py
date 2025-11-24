@@ -3,6 +3,8 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 )
 import torch
+import numpy as np
+from typing import Tuple
 
 reg_metrics_map = {
     "mae": mean_absolute_error,
@@ -46,8 +48,8 @@ def get_metrics(task : str, multiclass: bool) -> dict:
     return reg_metrics_map
 
 
-def PICP_MPIW(y_pred, y_std, y_true):
-
+def PICP_MPIW(y_pred:np.ndarray, y_std:np.ndarray, y_true:np.ndarray) -> Tuple[list, list]:
+    
     confidence_levels = torch.linspace(0.10, 0.90, 9)
 
     y_pred_t = torch.tensor(y_pred, dtype=torch.float32)

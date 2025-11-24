@@ -2,6 +2,8 @@ import torch
 import inspect
 from torch.optim import Optimizer
 from typing import Literal, Dict, Type
+import warnings
+
 
 OPTIMIZER_MAP: Dict[str, Type[Optimizer]] = {
     "adam": torch.optim.Adam,
@@ -31,10 +33,13 @@ def get_optimizer(optimizer: str, **kwargs) -> Optimizer:
     """
     Returns the optimizer instance for the given optimizer name.
     """
-    if optimizer == 'sgd' and 'momentum' in kwargs:
-        if kwargs['momentum'] is None:
-            raise ValueError(f"momentum can't be None for sgd optimizer")
-    
+    if optimizer == 'sgd' and kwargs['momentum'] is None:
+        raise ValueError(f"momentum can't be None for sgd optimizer")
+    elif optimizer != 'sgd' and kwargs['momentum'] is not None:
+            warnings.warn(
+                f"Ignoring 'momentum' parameter: it is not used by {optimizer} optimizer.",
+                UserWarning
+            )
     optimizer_class = OPTIMIZER_MAP[optimizer]
     valid_params = inspect.signature(optimizer_class).parameters
     filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}

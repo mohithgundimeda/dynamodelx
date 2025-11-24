@@ -12,7 +12,6 @@ from dynamodelx.utils.metrics import get_metrics, PICP_MPIW
 from ...utils.loss import N_ELBO_KLD, N_ELBO_NLL
 from ...utils.TrainingHistory import TrainingHistory
 
-# Make TrainingHistory a seperate file
 # do tying tests for bnn regressor
 
 class NN(nn.Module):
@@ -36,10 +35,10 @@ class NN(nn.Module):
         
     def __post_init__(self):
         
-        layers = [self.input_dim] + self.hidden_layers + [self.output_dim*2] # make sure, correct validation has happend on output_dim
+        layers = [self.input_dim] + self.hidden_layers + [self.output_dim*2]
         
         for in_f, dim in zip(layers[:-1], layers[1:]):
-            self.weight_mu.append(nn.Parameter(torch.randn(dim, in_f))) # q(w) initial distribution is N(0, 1)
+            self.weight_mu.append(nn.Parameter(torch.randn(dim, in_f)))
             self.bias_mu.append(nn.Parameter(torch.randn(dim)))
             
             self.weight_rho.append(nn.Parameter(torch.randn(dim, in_f)* 0.1 - 3))
@@ -83,9 +82,9 @@ class NN(nn.Module):
 class BnnRegressor:
 
     ARCHITECTURE_MAP : Dict[str, Tuple]= {
-        "small": (64, 32),
-        "medium": (128, 64, 32),
-        "large": (256, 128, 64, 32)
+        "small": [64, 32],
+        "medium": [128, 64, 32],
+        "large": [256, 128, 64, 32]
     }
     
     def __init__(self,
@@ -268,6 +267,8 @@ class BnnRegressor:
         X = X_to_torch(X, input_dim=self.input_dim)
         y = preprocess_y(y, task='regression', multiclass=False, output_dim=self.output_dim, uncertainty=False)
         
+        if batch_size > X.shape[0]:
+            raise RuntimeError(f'batch_size:{batch_size} is higher than the given samples X:{X.shape[0]}')
         if X.shape[0] != y.shape[0]:
             raise ValueError(f"Number of samples in X ({X.shape[0]}) and y ({y.shape[0]}) do not match.")
         
@@ -329,6 +330,9 @@ class BnnRegressor:
             batch_size (int, optional): No of samples in each batch, defaults to 32.
             mc_samples (int, optional): No of monte carlo samples to draw for a prediction.
         """
+        if not hasattr(self, 'model'):
+            raise RuntimeError(f'Call build() to build the model before training')
+        
         if not isinstance(epochs, int):
             raise TypeError(
                 f'Expected epochs to be an integer'
@@ -356,16 +360,18 @@ class BnnRegressor:
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than 0")
         
-        if batch_size > X.shape[0]:
-            import warnings
-            warnings.warn(
-                f"batch_size ({batch_size}) is larger than the dataset size ({X.shape[0]}). "
-                "It will be reduced to dataset size."
-            )
-            batch_size = X.shape[0]
-        
         train_loader, val_loader, test_loader = self.preprocess_user_data(X=X, y=y, val_size=val_size, test_size=test_size, batch_size=batch_size)
-        optimizer_function = get_optimizer(self.optimizer, params=self.model.parameters(), lr = learning_rate, momentum = momentum if momentum else None)
+        
+        kwargs = {
+            'lr' : learning_rate,
+            'params' : self.model.parameters()
+        }
+
+        if momentum is None:
+            kwargs['momentum'] = None
+        else:
+            kwargs['momentum'] = momentum
+        optimizer_function = get_optimizer(self.optimizer, **kwargs)
         
         train_loss_track = []
         val_loss_track = []
@@ -406,7 +412,7 @@ class BnnRegressor:
                 train_samples += num_samples
             
             avg_train_loss = train_loss / train_samples
-            train_loss_track.append(avg_train_loss)
+            train_loss_track.append(avg_train_loss.detach().cpu().numpy())
             
             self.model.eval()
             val_loss = 0
@@ -472,7 +478,7 @@ class BnnRegressor:
 
             
             avg_val_loss = val_loss / val_samples
-            val_loss_track.append(avg_val_loss)
+            val_loss_track.append(avg_val_loss.detach().cpu().numpy())
                 
             if (epoch+1) == epochs:
                 print(
@@ -499,10 +505,18 @@ class BnnRegressor:
                     y_test_mean_stack.append(y_test_mean_sample)
                     y_test_std_stack.append(y_test_std_sample)
                 
-                y_test_mean_pred = torch.stack(y_test_mean_stack).mean(dim=0)
-                y_test_std_pred = torch.stack(y_test_std_stack).mean(dim=0)
+                y_test_mean_stack = torch.stack(y_test_mean_stack)
+                y_test_std_stack  = torch.stack(y_test_std_stack) 
+
+                epistemic_var = y_test_mean_stack.var(dim=0)
+
+                aleatoric_var = (y_test_std_stack**2).mean(dim=0)
+
+                y_test_std_pred = torch.sqrt(aleatoric_var + epistemic_var)
+
+                y_test_mean_pred = y_test_mean_stack.mean(dim=0)
                 
-                loss_test = N_ELBO_NLL(y_test_mean_pred, y_test_batch)
+                loss_test = N_ELBO_NLL(y_test_mean_pred, y_test_std_pred, y_test_batch)
                 
                 test_loss += loss_test * num_samples
                 test_samples += num_samples
@@ -513,29 +527,37 @@ class BnnRegressor:
             
         print(f"Average Test Loss: {test_loss/test_samples:.2f}")
         
+        y_test_mean_pred_track = np.concatenate(y_test_mean_pred_track, axis=0)
+        y_test_std_pred_track = np.concatenate(y_test_std_pred_track, axis=0)
+        y_test_true_track = np.concatenate(y_test_true_track, axis=0)
+
         if self.return_metrics:
             test_metrics = {
                 f'test_{metric_name}': func(y_test_true_track, y_test_mean_pred_track)
                 for metric_name, func in self.metrics.items()
-            }
-        
-        y_test_mean_pred_track = np.concatenate(y_test_mean_pred_track, axis=0)
-        y_test_std_pred_track = np.concatenate(y_test_std_pred_track, axis=0)
-        y_test_true_track = np.concatenate(y_test_true_track, axis=0)
+    }
+
         
         picp_values, mpiw_values = PICP_MPIW(y_test_mean_pred_track, y_test_std_pred_track, y_test_true_track)
 
-        confidence_levels = np.linspace(0.10, 0.90, 9)
+        print("\n" + "="*70)
+        print("   PICP & MPIW across confidence levels on test data")
+        print("="*70)
 
-        for i, cl in enumerate(confidence_levels):
-            if self.output_dim == 1:
-                print(f"\nFor {cl*100:.0f}% Confidence Level --> PICP: {picp_values[i]:.4f}, MPIW: {mpiw_values[i]:.4f}")
+        for i, cl in enumerate(np.linspace(0.10, 0.90, 9)):
+            p = np.array(picp_values[i])
+            m = np.array(mpiw_values[i])
+            cl_pct = cl * 100
+
+            if p.ndim == 0 or p.size == 1:
+                print(f"{cl_pct:5.0f}% → PICP: {float(p):.4f} │ MPIW: {float(m):.4f}")
             else:
-                picp_str = ", ".join([f"{v:.4f}" for v in picp_values[i]])
-                mpiw_str = ", ".join([f"{v:.4f}" for v in mpiw_values[i]])
-                print(f"\nFor {cl*100:.0f}% Confidence Level --> PICP: [{picp_str}], MPIW: [{mpiw_str}]")
+                ps = ", ".join(f"{x:.4f}" for x in p)
+                ms = ", ".join(f"{x:.4f}" for x in m)
+                print(f"{cl_pct:5.0f}% → PICP: [{ps}] │ MPIW: [{ms}]")
         
-    
+        print("="*70)
+        
         if self.return_metrics:
             output_dict = TrainingHistory(
                             train = {'train_loss' : train_loss_track,},
@@ -549,6 +571,147 @@ class BnnRegressor:
                         )
 
         return output_dict
+    
+    def predict(self, X:np.ndarray, mc_samples:int=20):
+        
+        """
+        Takes input and predicts the ouput and it's standard-deviation
+        Args:
+        X (np.ndarray): Takes input samples to predict.
+        mc_samples (int): No of samples to sample from the posterior. Default to 20.
+        """
+        
+        X = X_to_torch(X, input_dim=self.input_dim)
+        X = (X - self.X_mean) / self.X_std
+        
+        X = X.to(self.device)
+        
+        if not X.shape[0]:
+            raise RuntimeError(f"Provided empty data")
+        
+        y_pred_stack = []
+        y_std_stack = []
+        
+        try:
+            self.model.eval()
+        except AttributeError:
+            raise AttributeError('No model is detected')
+        
+        with torch.no_grad():
+            for _ in range(mc_samples):
+                y_pred, y_std =self.model(X)
+                y_pred_stack.append(y_pred)
+                y_std_stack.append(y_std)
+                
+            y_pred_stack = torch.stack(y_pred_stack)
+            y_std_stack = torch.stack(y_std_stack)
+            
+            aleatoric_var = (y_std_stack**2).mean(dim=0)
+            epistemic_var = y_pred_stack.var(dim=0)
+            
+            y_pred_std = torch.sqrt(aleatoric_var + epistemic_var)
+            
+            y_pred = torch.mean(y_pred_stack, dim=0)
+        
+        return y_pred.detach().cpu().numpy(), y_pred_std.detach().cpu().numpy()
+    
+    def save(self, parameters_path:str, arguments_path:str) -> None:
+        """
+        Upon calling, the method will save the model's state
+
+        Args:
+            parameters_path (str): Path to save the model parameter
+            arguments_path (str): Path to save the model architecture
+        """
+        
+        if not isinstance(parameters_path, str) or len(parameters_path.strip()) == 0:
+            raise ValueError("Path must be a non-empty string.")
+
+        if "." not in parameters_path:
+            raise ValueError("Please provide a file name with extension, e.g., 'model.pth'")
+        
+        if not isinstance(arguments_path, str) or len(arguments_path.strip()) == 0:
+            raise ValueError("Path must be a non-empty string.")
+
+        if "." not in arguments_path:
+            raise ValueError("Please provide a file name with extension, e.g., 'model.pth'")
+
+        state_ext = parameters_path.split(".")[-1].lower()
+        arch_ext = arguments_path.split(".")[-1].lower()
+
+        allowed_exts = {"pth", "pt", "ckpt", "bin"}
+        
+        if state_ext not in allowed_exts:
+            print(f"Warning: parameters_path extension '.{state_ext}' is unusual for PyTorch models. "
+                f"Recommended: .pth, .pt, .ckpt")
+        
+        if arch_ext not in allowed_exts:
+            print(f"Warning: arguments_path extension '.{arch_ext}' is unusual for PyTorch models. "
+                f"Recommended: .pth, .pt, .ckpt")
+
+        if not hasattr(self, "model"):
+            raise RuntimeError("Model not built yet. Call build() or train() before saving.")
+        
+        model_args = {
+            "model_size" : self.model_size,
+            "input_dim" : self.input_dim,
+            "output_dim" : self.output_dim,
+            "device": self.device.type,
+            "hidden_activation" : self.hidden_activation,
+            "optimizer" : self.optimizer,
+            "mc_samples": self.mc_samples,
+            "custom_architecture" : self.custom_architecture,
+            "return_metrics" : self.return_metrics,
+            "auto_build" : self.auto_build,
+            "X_mean" : self.X_mean,
+            "X_std" : self.X_std
+        }
+        
+        try:
+            torch.save(self.model.state_dict(), parameters_path)
+            torch.save(model_args, arguments_path)
+        except Exception as e:
+            raise RuntimeError(f"Error saving model: {e}")
+         
+        print(f"Model's state successfully saved to: {parameters_path}")
+        print(f"Model's architecture successfully saved to: {arguments_path}")
+    
+    @classmethod
+    def load(cls, parameters_path:str, arguments_path:str):
+        """
+        Loading the saved architecture and model's trained parameters
+        """
+        
+        args = torch.load(arguments_path, map_location='cpu')
+        bnn = cls(
+            model_size=args.get('model_size'),
+            input_dim=args.get('input_dim'),
+            output_dim=args.get('output_dim'),
+            device=args.get('device'),
+            hidden_activation=args.get('hidden_activation'),
+            optimizer=args.get('optimizer'),
+            mc_samples=args.get('mc_samples'),
+            custom_architecture=args.get('custom_architecture'),
+            return_metrics=args.get('return_metrics'),
+            auto_build=args.get('auto_build')
+        )
+        
+        
+        state_dict = torch.load(parameters_path, map_location=args['device'])
+        bnn.model.load_state_dict(state_dict)
+        
+        bnn.X_mean = args['X_mean']
+        bnn.X_std = args['X_std']
+        return bnn
+        
+        
+    
+        
+        
+        
+        
+        
+        
             
             
             

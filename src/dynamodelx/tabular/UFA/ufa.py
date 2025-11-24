@@ -388,7 +388,7 @@ class UFA:
                 elif self.task == "regression" and self.uncertainty:
                     assert (
                         y_train_pred.shape[1] == y_train_batch.shape[1] * 2
-                    ), f"Uncertainty regression expects output_dim*2 neurons for mean+var, got {y_train_pred.shape} vs {y_train_batch.shape}"
+                    ), f"Uncertainty regression expects output_dim*2 neurons for mean + std, got {y_train_pred.shape} vs {y_train_batch.shape}"
 
                 else:
                     assert(
