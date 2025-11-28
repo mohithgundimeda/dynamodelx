@@ -48,16 +48,16 @@ def get_metrics(task : str, multiclass: bool) -> dict:
     return reg_metrics_map
 
 
-def PICP_MPIW(y_pred:np.ndarray, y_std:np.ndarray, y_true:np.ndarray) -> Tuple[list, list]:
+def PICP_MPIW(y_pred:np.ndarray, y_std:np.ndarray | torch.Tensor, y_true:np.ndarray) -> Tuple[list, list]:
     
     confidence_levels = torch.linspace(0.10, 0.90, 9)
 
-    y_pred_t = torch.tensor(y_pred, dtype=torch.float32)
-    y_std_t  = torch.tensor(y_std, dtype=torch.float32)
-    y_true_t = torch.tensor(y_true, dtype=torch.float32)
+    y_pred_t = torch.as_tensor(y_pred, dtype=torch.float32)
+    y_std_t  = torch.as_tensor(y_std, dtype=torch.float32)
+    y_true_t = torch.as_tensor(y_true, dtype=torch.float32)
 
     picp_list, mpiw_list = [], []
-
+    
     for ci in confidence_levels:
         alpha = (1 + ci) / 2.0
         z_val = torch.sqrt(torch.tensor(2.0)) * torch.erfinv(2 * alpha - 1)

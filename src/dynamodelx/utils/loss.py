@@ -4,24 +4,19 @@ from typing import Literal, Dict , Callable
 LossType = Literal['mean_square_loss', 'binary_cross_entropy', 'cross_entropy_loss', 'gaussian_nll_loss']
 
 def N_ELBO_NLL(y_pred_mean: torch.Tensor, y_pred_std: torch.Tensor, y_true:torch.Tensor):
-    return torch.mean(0.5 * (((y_pred_mean - y_true)**2)/(y_pred_std**2)) + 0.5 * torch.log(2*torch.pi*(y_pred_std**2)))
+    var = torch.clamp(y_pred_std**2, min=1e-6)
+    return torch.mean(0.5 * (((y_pred_mean - y_true)**2)/(var)) + 0.5 * torch.log(2*torch.pi*(var)))
     
-def N_ELBO_KLD(mean:torch.Tensor, rho:torch.Tensor):
-    std = torch.nn.functional.softplus(rho).clamp(min=1e-6)
-    numel = mean.numel()
+def N_ELBO_KLD(mu, log_var):
+    var = log_var.exp()
+    return 0.5 * torch.sum(mu**2 + var - log_var - 1)
 
-    return 0.5 * (
-        torch.sum(mean**2) +
-        torch.sum(std**2) -
-        torch.sum(torch.log(std**2)) -
-        numel
-    )
     
 def GaussianNLLLoss(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
     mean, rho = torch.chunk(y_pred, 2, dim=1)
     
-    std = torch.nn.functional.softplus(rho).clamp(min=1e-6)
-    var = std ** 2
+    std = torch.nn.functional.softplus(rho).clamp(min=1e-3)
+    var = std ** 2 + 1e-6
 
     return torch.mean(
         0.5 * torch.log(2 * torch.pi * var) +

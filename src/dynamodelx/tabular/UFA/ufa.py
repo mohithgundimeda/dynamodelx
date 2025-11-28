@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Self
 from sklearn.metrics import confusion_matrix
 from ...utils.activations import validate_hidden_act, get_hidden_act, ActivationType
 from ...utils.optimizer import validate_optimizer, get_optimizer, OptimizerType
@@ -145,7 +145,7 @@ class UFA:
         
         if self.uncertainty and self.loss != 'gaussian_nll_loss':
             raise ValueError(
-                f"Can't perform Uncertainty without gaussian_nll_loss"
+                f"Suggesting to use gaussian_nll_loss instead of {self.loss}"
             )
         if not self.uncertainty and  self.loss == 'gaussian_nll_loss':
             raise ValueError(
@@ -256,13 +256,12 @@ class UFA:
                              output_dim=self.output_dim,
                              uncertainty=self.uncertainty,
                              )
-
+            
+            if batch_size > X.shape[0]:
+                raise RuntimeError(f'batch_size:{batch_size} is higher than the given samples X:{X.shape[0]}')
             if X.shape[0] != y.shape[0]:
                 raise ValueError(f"Number of samples in X ({X.shape[0]}) and y ({y.shape[0]}) do not match.")
             
-            if X.shape[0] == 0:
-                raise RuntimeError("Empty dataset provided.")
-
             
             self.X_mean = X.mean(dim=0)
             self.X_std = X.std(dim=0)
@@ -315,7 +314,10 @@ class UFA:
             test_size : float = 0.1,
             batch_size : int = 32
     ) -> dict:
-
+        
+        if not hasattr(self, 'model'):
+            raise RuntimeError(f'Call build() to build the model before training')
+        
         if not isinstance(epochs, int):
             raise TypeError(
                 f'Expected epochs to be an integer'
@@ -343,16 +345,6 @@ class UFA:
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than 0")
         
-        if batch_size > X.shape[0]:
-            import warnings
-            warnings.warn(
-                f"batch_size ({batch_size}) is larger than the dataset size ({X.shape[0]}). "
-                "It will be reduced to dataset size."
-            )
-            batch_size = X.shape[0]
-
-        
-        
         train_loader, val_loader, test_loader = self.preprocess_user_data(
                                                                             X = X, 
                                                                             y = y, 
@@ -361,8 +353,18 @@ class UFA:
                                                                             batch_size = batch_size
                                                                             )
         
-        optimizer_function = get_optimizer(self.optimizer, params= self.model.parameters(), lr = learning_rate, momentum = momentum if momentum else None)
+        kwargs = {
+                'lr' : learning_rate,
+                'params' : self.model.parameters()
+            }
 
+        if momentum is None:
+            kwargs['momentum'] = None
+        else:
+            kwargs['momentum'] = momentum
+            
+        optimizer_function = get_optimizer(self.optimizer, **kwargs)
+        
         train_loss_track = []
         val_loss_track = []
         
@@ -482,6 +484,8 @@ class UFA:
                 
                 if self.uncertainty:
                     _ , rho = torch.chunk(y_test_pred, 2, dim=1)
+                    if self.output_dim == 1 and rho.ndim == 2 and rho.shape[1] == 1:
+                        rho = rho.squeeze(dim=1)
                     y_test_rho_concat.append(rho.cpu().numpy())
                 
                 loss_test = self.loss_function(y_test_pred, y_test_batch)
@@ -511,7 +515,7 @@ class UFA:
         y_test_true_concat = np.concatenate(y_test_true_concat, axis=0)
         
         if self.uncertainty:
-            y_test_rho_concat = np.concatenate(y_test_rho_concat, axis=0)
+            y_test_rho_concat = np.concatenate(y_test_rho_concat, axis=0) # return [B, d]
 
         assert (
             y_test_pred_concat.shape == y_test_true_concat.shape
@@ -525,19 +529,21 @@ class UFA:
                 for metric_name, func in self.metrics.items()
             }
         
-        y_test_std_concat = torch.nn.functional.softplus(y_test_rho_concat).clamp(min=1e-6)
-        
-        picp_values, mpiw_values = PICP_MPIW(y_test_pred_concat, y_test_std_concat, y_test_true_concat)
+        if self.uncertainty:
+            
+            y_test_std_concat = torch.nn.functional.softplus(torch.from_numpy(y_test_rho_concat)).clamp(min=1e-3)
+                        
+            picp_values, mpiw_values = PICP_MPIW(y_test_pred_concat, y_test_std_concat, y_test_true_concat)
 
-        confidence_levels = np.linspace(0.10, 0.90, 9)
+            confidence_levels = np.linspace(0.10, 0.90, 9)
 
-        for i, cl in enumerate(confidence_levels):
-            if self.output_dim == 1:
-                print(f"\nFor {cl*100:.0f}% Confidence Level --> PICP: {picp_values[i]:.4f}, MPIW: {mpiw_values[i]:.4f}")
-            else:
-                picp_str = ", ".join([f"{v:.4f}" for v in picp_values[i]])
-                mpiw_str = ", ".join([f"{v:.4f}" for v in mpiw_values[i]])
-                print(f"\nFor {cl*100:.0f}% Confidence Level --> PICP: [{picp_str}], MPIW: [{mpiw_str}]")
+            for i, cl in enumerate(confidence_levels):
+                if self.output_dim == 1:
+                    print(f"\nFor {cl*100:.0f}% Confidence Level --> PICP: {picp_values[i]:.4f}, MPIW: {mpiw_values[i]:.4f}")
+                else:
+                    picp_str = ", ".join([f"{v:.4f}" for v in picp_values[i]])
+                    mpiw_str = ", ".join([f"{v:.4f}" for v in mpiw_values[i]])
+                    print(f"\nFor {cl*100:.0f}% Confidence Level --> PICP: [{picp_str}], MPIW: [{mpiw_str}]")
 
         print(
             f"\nAverage test loss per sample: {avg_test_loss}"
@@ -572,6 +578,8 @@ class UFA:
         - Binary classification (0/1)
         - Multiclass classification (class index)
         """
+        if not hasattr(self, 'model'):
+            raise RuntimeError(f'Call build() to build the model, train() to train')
 
         input = X_to_torch(input, input_dim=self.input_dim)
 
@@ -589,7 +597,7 @@ class UFA:
         if self.uncertainty:
 
             mean , rho = torch.chunk(output, 2, dim=1)
-            std = torch.nn.functional.softplus(rho).clamp(min=1e-6, max=1e2)
+            std = torch.nn.functional.softplus(rho).clamp(min=1e-3)
             
             mean = mean.squeeze(-1) if mean.ndim ==2 and mean.shape[1] ==1 else mean
             std = std.squeeze(-1) if std.ndim ==2 and std.shape[1] ==1 else std
@@ -612,37 +620,99 @@ class UFA:
 
             
 
-    def save(self, path: str) -> None:
+    def save(self, parameters_path:str, arguments_path:str) -> None:
         """
-        Save the trained model weights (state_dict) to a file.
+        Upon calling, the method will save the model's parameters and hyperparameters
 
-        Recommended extensions:
-        - .pth (PyTorch standard)
-        - .pt
-        - .ckpt
+        Args:
+            parameters_path (str): Path to save the model parameter
+            arguments_path (str): Path to save the model architecture
         """
-
-        if not isinstance(path, str) or len(path.strip()) == 0:
+        
+        if not isinstance(parameters_path, str) or len(parameters_path.strip()) == 0:
             raise ValueError("Path must be a non-empty string.")
 
-        if "." not in path:
+        if "." not in parameters_path:
+            raise ValueError("Please provide a file name with extension, e.g., 'model.pth'")
+        
+        if not isinstance(arguments_path, str) or len(arguments_path.strip()) == 0:
+            raise ValueError("Path must be a non-empty string.")
+
+        if "." not in arguments_path:
             raise ValueError("Please provide a file name with extension, e.g., 'model.pth'")
 
-        ext = path.split(".")[-1].lower()
+        state_ext = parameters_path.split(".")[-1].lower()
+        arch_ext = arguments_path.split(".")[-1].lower()
 
         allowed_exts = {"pth", "pt", "ckpt", "bin"}
-        if ext not in allowed_exts:
-            print(f"Warning: Extension '.{ext}' is unusual for PyTorch models. "
+        
+        if state_ext not in allowed_exts:
+            print(f"Warning: parameters_path extension '.{state_ext}' is unusual for PyTorch models. "
+                f"Recommended: .pth, .pt, .ckpt")
+        
+        if arch_ext not in allowed_exts:
+            print(f"Warning: arguments_path extension '.{arch_ext}' is unusual for PyTorch models. "
                 f"Recommended: .pth, .pt, .ckpt")
 
         if not hasattr(self, "model"):
             raise RuntimeError("Model not built yet. Call build() or train() before saving.")
-
+        
+        model_args = {
+            "task": self.task,
+            "model_size" : self.model_size,
+            "input_dim" : self.input_dim,
+            "output_dim" : self.output_dim,
+            "loss" : self.loss,
+            "device": self.device.type,
+            "hidden_activation" : self.hidden_activation,
+            "optimizer" : self.optimizer,
+            "custom_architecture" : self.custom_architecture,
+            "return_metrics" : self.return_metrics,
+            "uncertainty" : self.uncertainty,
+            "auto_build" : self.auto_build,
+            "multiclass" : self.multiclass,
+            "X_mean" : self.X_mean,
+            "X_std" : self.X_std
+        }
+        
         try:
-            torch.save(self.model.state_dict(), path)
+            torch.save(self.model.state_dict(), parameters_path)
+            torch.save(model_args, arguments_path)
         except Exception as e:
             raise RuntimeError(f"Error saving model: {e}")
-         
-        print(f"Model successfully saved to: {path}")
+            
+        print(f"Model's state successfully saved to: {parameters_path}")
+        print(f"Model's architecture successfully saved to: {arguments_path}")
     
-    
+    @classmethod
+    def load(cls, parameters_path:str, arguments_path:str) -> Self:
+        """
+        Loading the saved architecture and model's trained parameters
+        """
+        
+        args = torch.load(arguments_path, map_location='cpu')
+        ufa = cls(
+            task=args.get('task'),
+            model_size=args.get('model_size'),
+            input_dim=args.get('input_dim'),
+            output_dim=args.get('output_dim'),
+            loss=args.get('loss'),
+            device=args.get('device'),
+            hidden_activation=args.get('hidden_activation'),
+            optimizer=args.get('optimizer'),
+            custom_architecture=args.get('custom_architecture'),
+            return_metrics=args.get('return_metrics'),
+            uncertainty=args.get('uncertainty'),
+            multiclass=args.get('multiclass'),
+            auto_build=True
+        )
+        
+        state_dict = torch.load(parameters_path, map_location=args['device'])
+
+        ufa.model.load_state_dict(state_dict)
+        
+        ufa.X_mean = args['X_mean']
+        ufa.X_std = args['X_std']
+        return ufa
+
+

@@ -21,6 +21,9 @@ def X_to_torch(X: np.ndarray | list | torch.Tensor | tuple, input_dim : int) -> 
     if X.ndim == 1 :
         X = X.reshape(-1,1)
     
+    if X.shape[0] == 0:
+        raise RuntimeError("Empty dataset provided.")
+    
     if X.shape[1] != input_dim:
         raise RuntimeError(
             f"Model expects input dimension of {input_dim} but recieved {X.shape[1]}"
@@ -54,6 +57,8 @@ def preprocess_y(
             if not isinstance(y, (np.ndarray, torch.Tensor)):
                 y = np.array(y)
             
+            if y.shape[0] == 0:
+                raise RuntimeError(f'Given y is empty')
 
             if task == "classification":
                 if not multiclass:
@@ -76,7 +81,6 @@ def preprocess_y(
                             f"Multiclass needs labels {expected}, got {unique.tolist()}"
                         )
 
-                    
                     if isinstance(y, np.ndarray):
                         if not np.issubdtype(y.dtype, np.integer):
                             raise ValueError(f"Multiclass labels must be integers, got {y.dtype}")
