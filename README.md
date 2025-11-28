@@ -13,7 +13,7 @@ pip install dynamodelx
 
 DynaModelX contains:
 1. __UFA__ - Universal Function Approximator for tabular data.
-2. __BNNRegressor__ - Bayesian Neural Network Regressor for tabular data.
+2. __BnnRegressor__ - Bayesian Neural Network Regressor for tabular data.
 
 
 ## Universal Function Approximator (UFA)
@@ -158,24 +158,24 @@ __metrics__ returned for different tasks are as follows:
     * F1 Score
 
 
-## Bayesian Neural Network Regressor (BNNRegressor)
+## Bayesian Neural Network Regressor (BnnRegressor)
 ___
 
-__BNNRegressor__ can perform regression tasks on tabular data with uncertainty estimation. It is built on top of __pytorch__ to provide a simple interface for training Bayesian Neural Networks using Variational Inference. It handles both aleatoric and epistemic uncertainties.
+__BnnRegressor__ can perform regression tasks on tabular data with uncertainty estimation. It is built on top of __pytorch__ to provide a simple interface for training Bayesian Neural Networks using Variational Inference. It handles both aleatoric and epistemic uncertainties.
 
 ### Importing The Estimator
-To use __BNNRegressor__, import the estimator from dynamodelx
+To use __BnnRegressor__, import the estimator from dynamodelx
 
 ```python
 from dynamodelx import BnnRegressor
 ```
-### Using BNNRegressor
+### Using BnnRegressor
 For Univariate Regression with Uncertainty,
 
 ```python
 
 from sklearn.datasets import fetch_california_housing
-from dynamodelx import BNNRegressor
+from dynamodelx import BnnRegressor
 from dynamodelx.plots import draw_plots
 data = fetch_california_housing()
 X, y = data.data, data.target
@@ -200,14 +200,14 @@ bnn.save(parameters_path='bnn_model.pt', arguments_path='bnn_args.pt')
 bnn = BnnRegressor.load(parameters_path='bnn_model.pt', arguments_path='bnn_args.pt')
 ```
 
-__Functions__ in __BNNRegressor__:
+__Functions__ in __BnnRegressor__:
 * __build__ - to build the model architecture according to the user specifications.
 * __train__ - to train the model on the given dataset.
 * __predict__ - to make predictions on new data. Returns prediction and standard-deviation.
 * __save__ - to save the trained model to the disk.
 * __load__ - to load a saved model from the disk.
 
-The hyperparameters for this estimator to initialize __BNNRegressor__ are as follows:
+The hyperparameters for this estimator to initialize __BnnRegressor__ are as follows:
 * **model_size** represents the size of the model, it takes one of these values:
     * __'small'__ - contains 2 hidden layers. 64 and 32 neurons respectively.
     * __'medium'__ - contains 3 hidden layers. 128, 64 and 32 neurons respectively.
@@ -239,7 +239,7 @@ The hyperparameters for this estimator to initialize __BNNRegressor__ are as fol
 * **return_metrics** takes a boolean value, True if we want to return performance metrics after training, False otherwise. By default, it's set to True. If it's set to True, the __train__ method will return a dictionary of type **TrainingHistory** containing training loss, validation and test losses and their metrics.
 * **auto_build** takes a boolean value, True if we want to automatically build the model after initialization, False otherwise. By default, it's set to True. If it's set to False, we need to manually call the __build__ methods after initialization to build the model.
 
-The hyperparameters for the __train__ method of __BNNRegressor__ are as follows:
+The hyperparameters for the __train__ method of __BnnRegressor__ are as follows:
 * __X__ and __y__ are the feature matrix and target vector respectively.
 * **epochs** takes an integer, number of epochs to train the model.
 * **learning_rate** takes a float value, learning rate for the optimizer.
@@ -255,7 +255,7 @@ __metrics__ returned after training for regression task are as follows:
 
 
 ## Saving The Model
-To save the trained model, use the __save__ method of __UFA__ and __BNNRegressor__.
+To save the trained model, use the __save__ method of __UFA__ and __BnnRegressor__.
 
 ```python
 ufa.save(parameters_path='ufa_model.pt', arguments_path='ufa_args.pt')
@@ -265,13 +265,13 @@ This method takes the file names (with .pth, .pt, .ckpt, .bin extensions) as inp
 __parameters_path__ is the file name to save the model parameters (state_dict) and __arguments_path__ is the file name to save the model initialization arguments.
 
 ## Loading The Model
-To load a saved model, use the __load__ method of __UFA__ and __BNNRegressor__.
+To load a saved model, use the __load__ method of __UFA__ and __BnnRegressor__.
 
 ```python
-from dynamodelx import UFA, BNNRegressor
+from dynamodelx import UFA, BnnRegressor
 
 ufa = UFA.load(parameters_path='ufa_model.pt', arguments_path='ufa_args.pt')
-bnn = BNNRegressor.load(parameters_path='bnn_model.pt', arguments_path='bnn_args.pt')
+bnn = BnnRegressor.load(parameters_path='bnn_model.pt', arguments_path='bnn_args.pt')
 ```
 This method takes the file names (with .pth, .pt, .ckpt, .bin extensions) as input and loads the saved model from the current working directory.
 __parameters_path__ is the file name to load the model parameters (state_dict) and __arguments_path__ is the file name to load the model initialization arguments.
@@ -284,7 +284,7 @@ from dynamodelx.plots import draw_plots
 draw_plots(performance)
 ```
 
-This function takes the performance dictionary of type **TrainingHistory** returned by the __train__ method of __UFA__, __BNNRegressor__ as input and plots the training, validation and test losses and their metrics.
+This function takes the performance dictionary of type **TrainingHistory** returned by the __train__ method of __UFA__, __BnnRegressor__ as input and plots the training, validation and test losses and their metrics.
 
 ## Examples
 More examples can be found in the [__examples__ ](https://github.com/mohithgundimeda/dynamodelx/tree/main/examples "examples") folder of the repository.
