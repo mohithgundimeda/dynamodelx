@@ -163,6 +163,8 @@ ___
 
 __BnnRegressor__ can perform regression tasks on tabular data with uncertainty estimation. It is built on top of __pytorch__ to provide a simple interface for training Bayesian Neural Networks using Variational Inference. It handles both aleatoric and epistemic uncertainties.
 
+__Note__: __BnnRegressor__ also learns temperature parameter to calibrate the uncertainty estimates.
+
 ### Importing The Estimator
 To use __BnnRegressor__, import the estimator from dynamodelx
 
@@ -193,7 +195,7 @@ bnn = BnnRegressor(
     auto_build = True
 )
 
-performance = bnn.train(X=X, y=y, epochs=50, learning_rate = 0.01, momentum=None, val_size=0.2, test_size=0.1, batch_size=120)
+performance = bnn.train(X=X, y=y, epochs=50, learning_rate = 0.01, momentum=None, val_size=0.2, test_size=0.1, batch_size=120, temp_lr=0.01, temp_epochs=100)
 draw_plots(performance)
 prediction, std_dev = bnn.predict(X[:5])
 bnn.save(parameters_path='bnn_model.pt', arguments_path='bnn_args.pt')
@@ -247,6 +249,8 @@ The hyperparameters for the __train__ method of __BnnRegressor__ are as follows:
 * **val_size** takes a float value between 0 and 1, representing the proportion of validation data from the whole dataset. By default, it's set to 0.2.
 * **test_size** takes a float value between 0 and 1, representing the proportion of test data from the whole dataset. By default, it's set to 0.1.
 * **batch_size** takes an integer, number of samples per batch. By default, it's set to 32.
+* **temp_lr** takes a float value, learning rate for temperature parameter optimization. By default, it's set to 0.01.(Same optimizer as main model optimizer is used for temperature parameter optimization)
+* **temp_epochs** takes an integer, number of epochs to optimize the temperature parameter after main model training. By default, it's set to 100.
 
 __metrics__ returned after training for regression task are as follows:
 * Mean Absolute Error (MAE) on validation and test data.

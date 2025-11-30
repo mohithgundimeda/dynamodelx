@@ -322,7 +322,7 @@ class BnnRegressor:
         
         return train_loader, val_loader, test_loader
     
-    def train(self, X:np.ndarray, y:np.ndarray, epochs:int, learning_rate:float, momentum:Optional[float] = None, val_size:float=0.2, test_size:float=0.1, batch_size:int=32):
+    def train(self, X:np.ndarray, y:np.ndarray, epochs:int, learning_rate:float, momentum:Optional[float] = None, val_size:float=0.2, test_size:float=0.1, batch_size:int=32, temp_lr:float=0.01, temp_epochs:int=100):
         """
         Train's the built model
         Args:
@@ -334,7 +334,8 @@ class BnnRegressor:
             val_size (float, optional): Portion of data used for validation, defaults to 0.2.
             test_size (float, optional): Portion of data used for test, defaults to 0.1.
             batch_size (int, optional): No of samples in each batch, defaults to 32.
-            mc_samples (int, optional): No of monte carlo samples to draw for a prediction.
+            temp_lr (float, optional): Learning rate for temperature parameter.
+            temp_epochs (int, optional): No of epochs for updating temperature parameter
         """
         if not hasattr(self, 'model'):
             raise RuntimeError(f'Call build() to build the model before training')
@@ -517,11 +518,10 @@ class BnnRegressor:
         y_calib = dataset.tensors[1].to(self.device)
 
         log_T = torch.nn.Parameter(torch.zeros(1, device=self.device))
-        temp_opt = torch.optim.Adam([log_T], lr=0.001)
-
-        num_calib_steps =100
         
-        for _ in range(num_calib_steps):
+        temp_opt= get_optimizer(optimizer = self.optimizer, lr=temp_lr, params=[log_T], momentum = momentum if momentum is not None else None)
+        
+        for _ in range(temp_epochs):
 
             mean_raw, std_raw = self.model(X_calib)
             mean_raw = mean_raw.detach()
