@@ -2,15 +2,23 @@ import torch
 from typing import Literal, Dict , Callable
 
 LossType = Literal['mean_square_loss', 'binary_cross_entropy', 'cross_entropy_loss', 'gaussian_nll_loss']
+bce_logits_loss = torch.nn.BCEWithLogitsLoss()
 
 def N_ELBO_NLL(y_pred_mean: torch.Tensor, y_pred_std: torch.Tensor, y_true:torch.Tensor):
     var = torch.clamp(y_pred_std**2, min=1e-6)
     return torch.mean(0.5 * (((y_pred_mean - y_true)**2)/(var)) + 0.5 * torch.log(2*torch.pi*(var)))
     
+def BCE(y_train_pred:torch.Tensor, y_true:torch.Tensor) -> torch.Tensor:
+    return bce_logits_loss(y_train_pred, y_true)
+
 def N_ELBO_KLD(mu, log_var):
     var = log_var.exp()
     return 0.5 * torch.sum(mu**2 + var - log_var - 1)
 
+def N_ELBO_KLD_STD(mu, log_std):
+    std = torch.exp(log_std)
+    var = std**2
+    return 0.5 * torch.sum(mu**2 + var - torch.log(var) - 1)
     
 def GaussianNLLLoss(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
     mean, rho = torch.chunk(y_pred, 2, dim=1)
