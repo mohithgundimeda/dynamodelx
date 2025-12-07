@@ -97,7 +97,7 @@ class BnnRegressor:
                 device: DeviceType = 'cuda',
                 hidden_activation : ActivationType = 'relu',
                 optimizer : OptimizerType = 'adam',
-                mc_samples:int = 10,
+                mc_samples:int = 20,
                 custom_architecture : Optional[list[int]] = None,
                 return_metrics : bool = True,
                 auto_build : bool = True
@@ -629,13 +629,13 @@ class BnnRegressor:
         
         return output_dict
     
-    def predict(self, X:np.ndarray, mc_samples:int=10):
+    def predict(self, X:np.ndarray, mc_samples:int=20) -> Tuple[np.ndarray, np.ndarray]:
         
         """
         Takes input and predicts the ouput and it's standard-deviation
         Args:
         X (np.ndarray): Takes input samples to predict.
-        mc_samples (int): No of samples to sample from the posterior. Default to 20.
+        mc_samples (int): Number of samples to sample from the posterior. Default to 20.
         """
         
         if not hasattr(self, 'model'):
@@ -692,13 +692,13 @@ class BnnRegressor:
             raise ValueError("Path must be a non-empty string.")
 
         if "." not in parameters_path:
-            raise ValueError("Please provide a file name with extension, e.g., 'model.pth'")
+            raise ValueError("Please provide a file name with extension, e.g., 'model_params.pt'")
         
         if not isinstance(arguments_path, str) or len(arguments_path.strip()) == 0:
             raise ValueError("Path must be a non-empty string.")
 
         if "." not in arguments_path:
-            raise ValueError("Please provide a file name with extension, e.g., 'model.pth'")
+            raise ValueError("Please provide a file name with extension, e.g., 'model_args.pt'")
 
         state_ext = parameters_path.split(".")[-1].lower()
         arch_ext = arguments_path.split(".")[-1].lower()

@@ -8,7 +8,7 @@ from dynamodelx.utils.activations import ActivationType, validate_hidden_act, ge
 from dynamodelx.utils.optimizer import OptimizerType, validate_optimizer, get_optimizer
 from dynamodelx.utils.custom_arch import validate_custom_arch
 from dynamodelx.utils.data import X_to_torch, preprocess_y
-from dynamodelx.utils.metrics import get_metrics, PICP_MPIW, epistemic_auc
+from dynamodelx.utils.metrics import get_metrics, binary_ece, epistemic_auc
 from ...utils.loss import N_ELBO_KLD_STD, BCE
 from ...utils.TrainingHistory import TrainingHistory
 
@@ -85,7 +85,7 @@ class BnnBinaryClassifier:
                 device: DeviceType = 'cuda',
                 hidden_activation : ActivationType = 'relu',
                 optimizer : OptimizerType = 'adam',
-                mc_samples:int = 10,
+                mc_samples:int = 20,
                 custom_architecture : Optional[list[int]] = None,
                 return_metrics : bool = True,
                 auto_build : bool = True
@@ -179,7 +179,7 @@ class BnnBinaryClassifier:
         """
         Prints a clean, table summary of the BNN model.
         """
-        if hasattr(self, model):
+        if hasattr(self, 'model'):
             model = self.model
         else:
             raise RuntimeError(f"Model not found, call build function.")
@@ -574,39 +574,22 @@ class BnnBinaryClassifier:
         y_test_std_pred_track = np.concatenate(y_test_std_pred_track, axis=0)
         y_test_true_track = np.concatenate(y_test_true_track, axis=0)
         
-        # To do -> squeeze the pred and true values to numpy 1ndim
-        # convert y_test_mean_pred_track into classes and send it to test metrics funcs
-
+        y_test_mean_pred_track = np.squeeze(y_test_mean_pred_track, axis=1)
+        y_test_std_pred_track = np.squeeze(y_test_std_pred_track, axis=1)
+        y_test_true_track = np.squeeze(y_test_true_track, axis=1)
+        
+        test_classes = (y_test_mean_pred_track > self.threshold).astype(float)
+        test_binary_error = test_classes - y_test_true_track
+        
         if self.return_metrics:
             test_metrics = {
-                f'test_{metric_name}': func(y_test_true_track, y_test_mean_pred_track)
-                for metric_name, func in self.metrics.items()
+                'test_Epistemic_AUC': epistemic_auc(errors=test_binary_error, uncertainties=y_test_std_pred_track),
+                **{f'test_{metric_name}': func(y_test_true_track, test_classes)
+                for metric_name, func in self.metrics.items()}
     }
 
         
-        picp_values, mpiw_values = PICP_MPIW(y_test_mean_pred_track, y_test_std_pred_track, y_test_true_track)
-
-        print("\n" + "="*70)
-        print("   PICP & MPIW across confidence levels on test data")
-        print("="*70)
-
-        CI = np.linspace(0.10, 0.90, 9)
-        for i, cl in enumerate(CI):
-            p = np.array(picp_values[i])
-            m = np.array(mpiw_values[i])
-            cl_pct = cl * 100
-
-            if p.ndim == 0 or p.size == 1:
-                print(f"{cl_pct:5.0f}% → PICP: {float(p):.4f} │ MPIW: {float(m):.4f}")
-            else:
-                ps = ", ".join(f"{x:.4f}" for x in p)
-                ms = ", ".join(f"{x:.4f}" for x in m)
-                print(f"{cl_pct:5.0f}% → PICP: [{ps}] │ MPIW: [{ms}]")
-        
-        print("="*70)
-        
-        print(f'Calibration Error : {np.mean(np.abs(np.array(picp_values) - CI)):.2f}')
-        
+        print(f'\nExpected Calibration Error : {binary_ece(y_true=y_test_true_track, y_prob=y_test_mean_pred_track):.2f}')        
         
         if self.return_metrics:
             output_dict = TrainingHistory(
@@ -623,4 +606,136 @@ class BnnBinaryClassifier:
         
         return output_dict
     
+    def predict(self, X:np.ndarray, mc_samples:int=20) -> Tuple[np.ndarray, np.ndarray]:
+        
+        """
+        Takes input and predicts the ouput and it's standard-deviation
+        Args:
+        X (np.ndarray): Takes input samples to predict.
+        mc_samples (int): Number of samples to sample from the posterior. Default to 20.
+        """
+        
+        if not hasattr(self, 'model'):
+            raise RuntimeError(f'Call build() to build the training')
+        
+        X = X_to_torch(X, input_dim=self.input_dim)
+        X = (X - self.X_mean) / self.X_std
+        
+        X = X.to(self.device)
+        
+        if not X.shape[0]:
+            raise RuntimeError(f"Provided empty data")
+        
+        y_logits_stack = []
+        
+        try:
+            self.model.eval()
+        except AttributeError:
+            raise AttributeError('No model is detected')
+        
+        with torch.no_grad():
+            for _ in range(mc_samples):
+                y_logits =self.model(X)
+                y_logits_stack.append(y_logits)
+                
+            y_logits_stack = torch.stack(y_logits_stack)
+            
+            y_logits_avg = y_logits_stack.mean(dim=0) #N,1
+            y_pred_std = torch.sqrt(y_logits_stack.var(dim=0, unbiased=False)) #N,1
+            
+            y_pred = y_logits_avg.detach().cpu().numpy() * self.y_std.numpy() + self.y_mean.numpy()
+            
+            y_pred_std = y_pred_std.detach().cpu().numpy() * self.y_std.numpy()
+        
+        return y_pred, y_pred_std
+    
+    def save(self, parameters_path:str, arguments_path:str) -> None:
+            """
+            Upon calling, the method will save the model's parameters and hyperparameters
+
+            Args:
+                parameters_path (str): Path to save the model parameter
+                arguments_path (str): Path to save the model architecture
+            """
+            
+            if not isinstance(parameters_path, str) or len(parameters_path.strip()) == 0:
+                raise ValueError("Path must be a non-empty string.")
+
+            if "." not in parameters_path:
+                raise ValueError("Please provide a file name with extension, e.g., 'model_params.pt'")
+            
+            if not isinstance(arguments_path, str) or len(arguments_path.strip()) == 0:
+                raise ValueError("Path must be a non-empty string.")
+
+            if "." not in arguments_path:
+                raise ValueError("Please provide a file name with extension, e.g., 'model_args.pt'")
+
+            state_ext = parameters_path.split(".")[-1].lower()
+            arch_ext = arguments_path.split(".")[-1].lower()
+
+            allowed_exts = {"pth", "pt", "ckpt", "bin"}
+            
+            if state_ext not in allowed_exts:
+                print(f"Warning: parameters_path extension '.{state_ext}' is unusual for PyTorch models. "
+                    f"Recommended: .pth, .pt, .ckpt")
+            
+            if arch_ext not in allowed_exts:
+                print(f"Warning: arguments_path extension '.{arch_ext}' is unusual for PyTorch models. "
+                    f"Recommended: .pth, .pt, .ckpt")
+
+            if not hasattr(self, "model"):
+                raise RuntimeError("Model not built yet. Call build() or train() before saving.")
+            
+            model_args = {
+                "model_size" : self.model_size,
+                "input_dim" : self.input_dim,
+                "device": self.device.type,
+                "hidden_activation" : self.hidden_activation,
+                "optimizer" : self.optimizer,
+                "mc_samples": self.mc_samples,
+                "custom_architecture" : self.custom_architecture,
+                "return_metrics" : self.return_metrics,
+                "auto_build" : self.auto_build,
+                "X_mean" : self.X_mean,
+                "X_std" : self.X_std,
+                "y_mean" : self.y_mean,
+                "y_std" : self.y_std
+            }
+            
+            try:
+                torch.save(self.model.state_dict(), parameters_path)
+                torch.save(model_args, arguments_path)
+            except Exception as e:
+                raise RuntimeError(f"Error saving model: {e}")
+            
+            print(f"Model's state successfully saved to: {parameters_path}")
+            print(f"Model's architecture successfully saved to: {arguments_path}")
+        
+    @classmethod
+    def load(cls, parameters_path:str, arguments_path:str) -> Self:
+        """
+        Loading the saved architecture and model's trained parameters
+        """
+        
+        args = torch.load(arguments_path, map_location='cpu')
+        bnn = cls(
+            model_size=args.get('model_size'),
+            input_dim=args.get('input_dim'),
+            device=args.get('device'),
+            hidden_activation=args.get('hidden_activation'),
+            optimizer=args.get('optimizer'),
+            mc_samples=args.get('mc_samples'),
+            custom_architecture=args.get('custom_architecture'),
+            return_metrics=args.get('return_metrics'),
+            auto_build=True
+        )
+        
+        state_dict = torch.load(parameters_path, map_location=args['device'])
+        bnn.model.load_state_dict(state_dict)
+        
+        bnn.X_mean = args['X_mean']
+        bnn.X_std = args['X_std']
+        bnn.y_mean = args['y_mean']
+        bnn.y_std = args['y_std']
+        return bnn
    

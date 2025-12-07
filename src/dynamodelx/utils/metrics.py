@@ -86,3 +86,29 @@ def epistemic_auc(errors, uncertainties):
     high_error = (errors > median_error).astype(int)
 
     return roc_auc_score(high_error, uncertainties)
+
+def binary_ece(y_true, y_prob, n_bins=10):
+
+    bin_edges = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+
+    for i in range(n_bins):
+        start = bin_edges[i]
+        end = bin_edges[i+1]
+
+        in_bin = (y_prob >= start) & (y_prob < end)
+        bin_size = np.sum(in_bin)
+
+        if bin_size == 0:
+            continue
+
+        bin_true = y_true[in_bin]
+        bin_prob = y_prob[in_bin]
+
+        accuracy = np.mean(bin_true)
+        confidence = np.mean(bin_prob)
+        weight = bin_size / len(y_true)
+
+        ece += weight * abs(accuracy - confidence)
+
+    return ece
