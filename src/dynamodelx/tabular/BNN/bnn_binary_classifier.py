@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
+from scipy.special import expit
 from typing import Dict, Tuple, Optional, Self
 from dynamodelx.utils.device import DeviceType, validate_device
 from dynamodelx.utils.activations import ActivationType, validate_hidden_act, get_hidden_act
@@ -185,7 +186,7 @@ class BnnBinaryClassifier:
             raise RuntimeError(f"Model not found, call build function.")
 
         print("\n====================================")
-        print("        Model Summary (BnnBinaryClassifier)        ")
+        print("        Model Summary        ")
         print("====================================")
 
         header = f"{'Layer (name)':<30} {'Shape':<20} {'Param #':<10}"
@@ -259,19 +260,14 @@ class BnnBinaryClassifier:
         
         num_samples = X.shape[0]
         
-        self.X_mean = X.mean(dim=0)
-        self.X_std = X.std(dim=0)
+        if not hasattr(self, 'X_mean'):
+            self.X_mean = X.mean(dim=0)
+            self.X_std = X.std(dim=0)
 
-        self.X_std = torch.where(self.X_std == 0, torch.ones_like(self.X_std), self.X_std)
+            self.X_std = torch.where(self.X_std == 0, torch.ones_like(self.X_std), self.X_std)
 
-        X = (X - self.X_mean) / self.X_std
-        
-        self.y_mean = y.mean(dim = 0)
-        self.y_std = y.std(dim = 0)
-        self.y_std = torch.where(self.y_std == 0, torch.ones_like(self.y_std), self.y_std)
-        
-        y = (y - self.y_mean) / self.y_std
-        
+            X = (X - self.X_mean) / self.X_std
+
         idx = torch.randperm(num_samples)
         n_test = int(num_samples * test_size)
         n_val = int(num_samples * val_size)
@@ -371,6 +367,8 @@ class BnnBinaryClassifier:
 
         
         train_loader, val_loader, test_loader = self._preprocess_user_data(X=X, y=y, val_size=val_size, test_size=test_size, batch_size=batch_size)
+        
+        
         self.threshold = threshold
         
         kwargs = {
@@ -399,7 +397,7 @@ class BnnBinaryClassifier:
                 X_train_batch, y_train_batch = X_train_batch.to(self.device, non_blocking=True), y_train_batch.to(self.device, non_blocking=True)
                 num_samples = X_train_batch.shape[0]
                 
-                y_train_pred = self.model(X = X_train_batch)
+                y_train_pred = self.model(X_train_batch)
                 
                 loss_nll = BCE(y_train_pred=y_train_pred, y_true=y_train_batch)
                 
@@ -430,7 +428,7 @@ class BnnBinaryClassifier:
             val_samples = 0
             
             if self.return_metrics:
-                total_val_predictions = []
+                total_val_prob_predictions = []
                 total_val_true_values = []
                 total_val_std_predictions = []
 
@@ -449,11 +447,10 @@ class BnnBinaryClassifier:
                         sampled_mean_pred.append(y_val_pred)
 
                     mean_stack = torch.stack(sampled_mean_pred)
-
                     y_val_mean_pred = mean_stack.mean(dim=0)
-
-                    epistemic_var = mean_stack.var(dim=0, unbiased=False)
-                    y_val_std_pred = torch.sqrt(torch.clamp(epistemic_var, min=1e-6, max=1e3))
+                    
+                    y_val_std_pred = torch.sigmoid(mean_stack).std(dim=0, unbiased=False)
+                    y_val_prob_pred= torch.sigmoid(y_val_mean_pred)
                     
                     loss_val = BCE(
                         y_train_pred=y_val_mean_pred,
@@ -464,8 +461,8 @@ class BnnBinaryClassifier:
                     val_samples += num_samples
 
                     if self.return_metrics:
-                        total_val_predictions.append(
-                            y_val_mean_pred.detach().cpu().numpy()
+                        total_val_prob_predictions.append(
+                            y_val_prob_pred.detach().cpu().numpy()
                         )
                         total_val_true_values.append(
                             y_val_batch.detach().cpu().numpy()
@@ -475,24 +472,23 @@ class BnnBinaryClassifier:
                         )
 
             if self.return_metrics:
-                total_val_predictions = np.concatenate(total_val_predictions, axis=0)
+                total_val_prob_predictions = np.concatenate(total_val_prob_predictions, axis=0)
                 total_val_true_values = np.concatenate(total_val_true_values, axis=0)
                 total_val_std_predictions = np.concatenate(total_val_std_predictions, axis=0)
                 
 
-                assert total_val_predictions.shape[0] == val_samples
-                assert total_val_true_values.shape == total_val_predictions.shape
-                assert total_val_std_predictions.shape == total_val_predictions.shape
+                assert total_val_prob_predictions.shape[0] == val_samples
+                assert total_val_true_values.shape == total_val_prob_predictions.shape
+                assert total_val_std_predictions.shape == total_val_prob_predictions.shape
                 
-                total_val_predictions = np.squeeze(total_val_predictions, axis=1)
+                total_val_prob_predictions = np.squeeze(total_val_prob_predictions, axis=1)
                 total_val_true_values = np.squeeze(total_val_true_values, axis=1)
                 total_val_std_predictions = np.squeeze(total_val_std_predictions, axis=1)
                 
-                probabilities = 1 / (1 + np.exp(-total_val_predictions))
-                pred_classes = (probabilities > self.threshold).astype(float)
+                pred_classes = (total_val_prob_predictions > self.threshold).astype(float)
 
-                binary_errors = np.abs(total_val_true_values - pred_classes)
-
+                binary_errors = np.abs(total_val_true_values - total_val_prob_predictions)
+                
                 for k, fun in self.metrics.items():
                     metrics_tracking[f'validation_{k}'].append(
                         fun(total_val_true_values, pred_classes)
@@ -521,15 +517,15 @@ class BnnBinaryClassifier:
         X_calib = dataset.tensors[0].to(self.device)
         y_calib = dataset.tensors[1].to(self.device)
 
-        log_T = torch.nn.Parameter(torch.zeros(1, device=self.device))
+        self.log_T = torch.nn.Parameter(torch.zeros(1, device=self.device))
         
-        temp_opt= get_optimizer(optimizer = self.optimizer, lr=temp_lr, params=[log_T], momentum = momentum if momentum is not None else None)
+        temp_opt= get_optimizer(optimizer = self.optimizer, lr=temp_lr, params=[self.log_T], momentum = momentum if momentum is not None else None)
         loss_fn = torch.nn.BCELoss()
         
         for _ in range(temp_epochs):
 
             pred_raw = self.model(X_calib)
-            T = torch.exp(log_T)
+            T = torch.exp(self.log_T)
             pred_prob = torch.sigmoid(pred_raw / T)
             
             loss = loss_fn(pred_prob, y_calib)
@@ -538,7 +534,7 @@ class BnnBinaryClassifier:
             loss.backward()
             temp_opt.step()
 
-        T = torch.exp(log_T.detach())
+        T = torch.exp(self.log_T.detach())
         
         test_loss = 0
         test_samples = 0 
@@ -551,13 +547,13 @@ class BnnBinaryClassifier:
                 X_test_batch, y_test_batch = X_test_batch.to(self.device), y_test_batch.to(self.device)
                 num_samples = X_test_batch.shape[0]
 
-                y_test_mean_stack = [self.model(X_test_batch) for _ in range(self.mc_samples)]
-                y_test_mean_stack = torch.stack(y_test_mean_stack)
-
-                y_test_mean_pred = torch.sigmoid(y_test_mean_stack.mean(dim=0) / T)
-
-                epistemic_var = y_test_mean_stack.var(dim=0, unbiased=False)
-                y_test_std_pred = torch.sqrt(epistemic_var)
+                y_test_mean_stack = torch.stack([self.model(X_test_batch) for _ in range(self.mc_samples)])
+                
+                y_test_mean_stack = y_test_mean_stack / T
+                y_test_avg_logits = y_test_mean_stack.mean(dim=0)
+                
+                y_test_std_pred =  torch.sigmoid(y_test_mean_stack).std(dim=0, unbiased=False)
+                y_test_mean_pred = torch.sigmoid(y_test_avg_logits)
                 
                 loss_test = loss_fn(y_test_mean_pred, y_test_batch)
                 
@@ -579,7 +575,7 @@ class BnnBinaryClassifier:
         y_test_true_track = np.squeeze(y_test_true_track, axis=1)
         
         test_classes = (y_test_mean_pred_track > self.threshold).astype(float)
-        test_binary_error = test_classes - y_test_true_track
+        test_binary_error = y_test_true_track - y_test_mean_pred_track
         
         if self.return_metrics:
             test_metrics = {
@@ -609,7 +605,7 @@ class BnnBinaryClassifier:
     def predict(self, X:np.ndarray, mc_samples:int=20) -> Tuple[np.ndarray, np.ndarray]:
         
         """
-        Takes input and predicts the ouput and it's standard-deviation
+        Takes input and predicts the ouput and it's standard-deviation and return ouputs, standard deviation's and their certainity (1 - entropy)
         Args:
         X (np.ndarray): Takes input samples to predict.
         mc_samples (int): Number of samples to sample from the posterior. Default to 20.
@@ -626,7 +622,7 @@ class BnnBinaryClassifier:
         if not X.shape[0]:
             raise RuntimeError(f"Provided empty data")
         
-        y_logits_stack = []
+        y_prob_stack = []
         
         try:
             self.model.eval()
@@ -636,18 +632,22 @@ class BnnBinaryClassifier:
         with torch.no_grad():
             for _ in range(mc_samples):
                 y_logits =self.model(X)
-                y_logits_stack.append(y_logits)
+                y_prob_stack.append(y_logits)
+            
+            y_prob_stack = torch.stack(y_prob_stack) / torch.exp(self.log_T.detach())
                 
-            y_logits_stack = torch.stack(y_logits_stack)
-            
-            y_logits_avg = y_logits_stack.mean(dim=0) #N,1
-            y_pred_std = torch.sqrt(y_logits_stack.var(dim=0, unbiased=False)) #N,1
-            
-            y_pred = y_logits_avg.detach().cpu().numpy() * self.y_std.numpy() + self.y_mean.numpy()
-            
-            y_pred_std = y_pred_std.detach().cpu().numpy() * self.y_std.numpy()
-        
-        return y_pred, y_pred_std
+            y_prob_avg = torch.sigmoid(y_prob_stack.mean(dim=0))            # [N, 1]
+            y_pred_std = torch.sigmoid(y_prob_stack).std(dim=0, unbiased=False)     # [N, 1]
+
+            y_pred = (y_prob_avg.detach().cpu().numpy().squeeze() > self.threshold).astype(int)
+            y_pred_std = y_pred_std.detach().cpu().numpy().squeeze()
+            y_prob_avg = y_prob_avg.detach().cpu().numpy().squeeze()
+
+            eps = 1e-12
+            entropy = - (y_prob_avg * np.log(y_prob_avg + eps) + (1 - y_prob_avg) * np.log(1 - y_prob_avg + eps)) / np.log(2)
+            certainty = 1 - entropy
+
+        return y_pred, y_pred_std, certainty
     
     def save(self, parameters_path:str, arguments_path:str) -> None:
             """
@@ -698,8 +698,8 @@ class BnnBinaryClassifier:
                 "auto_build" : self.auto_build,
                 "X_mean" : self.X_mean,
                 "X_std" : self.X_std,
-                "y_mean" : self.y_mean,
-                "y_std" : self.y_std
+                "log_T" : self.log_T.detach().cpu(),
+                "threshold" : self.threshold
             }
             
             try:
@@ -735,7 +735,6 @@ class BnnBinaryClassifier:
         
         bnn.X_mean = args['X_mean']
         bnn.X_std = args['X_std']
-        bnn.y_mean = args['y_mean']
-        bnn.y_std = args['y_std']
+        bnn.log_T = args['log_T'].to(device=args['device'])
+        bnn.threshold = args['threshold']
         return bnn
-   

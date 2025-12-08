@@ -206,7 +206,7 @@ class BnnRegressor:
             raise RuntimeError(f"Model not found, error while building the model")
 
         print("\n====================================")
-        print("        Model Summary (BnnRegressor)         ")
+        print("        Model Summary         ")
         print("====================================")
 
         header = f"{'Layer (name)':<30} {'Shape':<20} {'Param #':<10}"
@@ -643,7 +643,7 @@ class BnnRegressor:
         
         X = X_to_torch(X, input_dim=self.input_dim)
         X = (X - self.X_mean) / self.X_std
-        
+        # forgot to use log_T
         X = X.to(self.device)
         
         if not X.shape[0]:
