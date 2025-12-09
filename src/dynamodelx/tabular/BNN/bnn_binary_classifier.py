@@ -447,10 +447,13 @@ class BnnBinaryClassifier:
                         sampled_mean_pred.append(y_val_pred)
 
                     mean_stack = torch.stack(sampled_mean_pred)
-                    y_val_mean_pred = mean_stack.mean(dim=0)
+                    y_val_mean_pred = mean_stack.mean(dim=0) # [B, 1] logits
                     
-                    y_val_std_pred = torch.sigmoid(mean_stack).std(dim=0, unbiased=False)
-                    y_val_prob_pred= torch.sigmoid(y_val_mean_pred)
+                    y_val_prob_pred= torch.sigmoid(y_val_mean_pred).clamp(min=1e-6) # [B, 1] Probs
+                    y_val_var_pred = ((y_val_prob_pred * (1 - y_val_prob_pred))**2)* mean_stack.var(dim=0, unbiased=False)
+                    
+                    y_val_std_pred = torch.sqrt(y_val_var_pred + 1e-12)
+                    
                     
                     loss_val = BCE(
                         y_train_pred=y_val_mean_pred,
@@ -550,10 +553,12 @@ class BnnBinaryClassifier:
                 y_test_mean_stack = torch.stack([self.model(X_test_batch) for _ in range(self.mc_samples)])
                 
                 y_test_mean_stack = y_test_mean_stack / T
-                y_test_avg_logits = y_test_mean_stack.mean(dim=0)
                 
-                y_test_std_pred =  torch.sigmoid(y_test_mean_stack).std(dim=0, unbiased=False)
-                y_test_mean_pred = torch.sigmoid(y_test_avg_logits)
+                y_test_avg_logits = y_test_mean_stack.mean(dim=0) # [N, 1] logits                
+                y_test_mean_pred = torch.sigmoid(y_test_avg_logits).clamp(min=1e-6) # [N, 1] probs
+                
+                y_test_var_pred = ((y_test_mean_pred * (1 - y_test_mean_pred))**2) * y_test_mean_stack.var(dim=0, unbiased=False)
+                y_test_std_pred = torch.sqrt(y_test_var_pred + 1e-12)
                 
                 loss_test = loss_fn(y_test_mean_pred, y_test_batch)
                 
