@@ -2,26 +2,25 @@ import torch
 from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
+from scipy.special import expit
 from typing import Dict, Tuple, Optional, Self
 from dynamodelx.utils.device import DeviceType, validate_device
 from dynamodelx.utils.activations import ActivationType, validate_hidden_act, get_hidden_act
 from dynamodelx.utils.optimizer import OptimizerType, validate_optimizer, get_optimizer
 from dynamodelx.utils.custom_arch import validate_custom_arch
 from dynamodelx.utils.data import X_to_torch, preprocess_y
-from dynamodelx.utils.metrics import get_metrics, PICP_MPIW
-from ...utils.loss import N_ELBO_KLD, N_ELBO_NLL
+from dynamodelx.utils.metrics import get_metrics, binary_ece, epistemic_auc
+from ...utils.loss import N_ELBO_KLD_STD, BCE
 from ...utils.TrainingHistory import TrainingHistory
 
-
-
 class NN(nn.Module):
-    def __init__(self, hidden_layers:list[int], input_dim:int, output_dim:int, activation:nn.Module, device: torch.device):
+    def __init__(self, hidden_layers:list[int], input_dim:int, activation:nn.Module, device: torch.device, output_dim:int = 1):
         super().__init__()
         
         self.weight_mu = nn.ParameterList()
-        self.weight_log_var = nn.ParameterList()
+        self.weight_log_std = nn.ParameterList()
         self.bias_mu = nn.ParameterList()
-        self.bias_log_var = nn.ParameterList()
+        self.bias_log_std = nn.ParameterList()
 
         
         self.activation = activation
@@ -35,18 +34,18 @@ class NN(nn.Module):
         
     def __post_init__(self):
         
-        layers = [self.input_dim] + self.hidden_layers + [self.output_dim*2]
+        layers = [self.input_dim] + self.hidden_layers + [self.output_dim]
         
         for in_f, dim in zip(layers[:-1], layers[1:]):
             self.weight_mu.append(nn.Parameter(torch.randn(dim, in_f) * 0.05))  
             self.bias_mu.append(nn.Parameter(torch.randn(dim) * 0.05))
 
-            self.weight_log_var.append(nn.Parameter(torch.full((dim, in_f), -3.0)))
-            self.bias_log_var.append(nn.Parameter(torch.full((dim,), -3.0)))
+            self.weight_log_std.append(nn.Parameter(torch.full((dim, in_f), -1.5)))
+            self.bias_log_std.append(nn.Parameter(torch.full((dim,), -1.5)))
 
     @staticmethod
-    def logvar_to_std(log_var:torch.Tensor) -> torch.Tensor:
-        return torch.exp(0.5 * log_var)
+    def logstd_to_std(log_std:torch.Tensor) -> torch.Tensor:
+        return torch.exp(log_std)
     
     def forward(self, X:torch.Tensor, sample:bool=True) -> torch.Tensor:
         
@@ -54,15 +53,15 @@ class NN(nn.Module):
             w_mu = self.weight_mu[i]
             b_mu = self.bias_mu[i]
             
-            w_logvar = self.weight_log_var[i]
-            b_logvar = self.bias_log_var[i]
+            w_logstd = self.weight_log_std[i]
+            b_logstd = self.bias_log_std[i]
             
             if sample:
-                w_epsilon = torch.randn_like(w_logvar)
-                w = w_mu + self.logvar_to_std(w_logvar) * w_epsilon
+                w_epsilon = torch.randn_like(w_logstd)
+                w = w_mu + self.logstd_to_std(w_logstd) * w_epsilon
                 
-                b_epsilon = torch.randn_like(b_logvar)
-                b = b_mu +  self.logvar_to_std(b_logvar) * b_epsilon
+                b_epsilon = torch.randn_like(b_logstd)
+                b = b_mu +  self.logstd_to_std(b_logstd) * b_epsilon
             else:
                 w , b = w_mu, b_mu
             
@@ -71,19 +70,10 @@ class NN(nn.Module):
             if i < (len(self.weight_mu)-1):
                 X = self.activation(X)
         
-        mean_split, logvar_split = torch.chunk(X, 2, dim=1)
-        
-        logvar_split = torch.clamp(logvar_split, min=-10, max=5) # model output always will in between -10 and 5, the gradients will be 0 for smaple that predicts outside clamp
-        
-        std = torch.exp(0.5 * logvar_split)
-        
-        std = torch.clamp(std, min=1e-6, max=50)
-        
-        return mean_split, std
-                
+        return X
 
-class BnnRegressor:
-
+class BnnBinaryClassifier:
+    
     ARCHITECTURE_MAP : Dict[str, Tuple]= {
         "small": [64, 32],
         "medium": [128, 64, 32],
@@ -93,7 +83,6 @@ class BnnRegressor:
     def __init__(self,
                 model_size : Optional[str],
                 input_dim : int,
-                output_dim : int,
                 device: DeviceType = 'cuda',
                 hidden_activation : ActivationType = 'relu',
                 optimizer : OptimizerType = 'adam',
@@ -102,32 +91,30 @@ class BnnRegressor:
                 return_metrics : bool = True,
                 auto_build : bool = True
                 ):
-        """
+            """
 
-        Args:
-            model_size (Optional[str]): size of the model - ['small', 'medium', 'large']
-            input_dim (int): input dimension
-            output_dim (int): output dimension
-            device (DeviceType, optional): Uses this device to train the model. Defaults to 'cuda'.
-            hidden_activation (ActivationType, optional): Neural Net's activation function(same for all layers). Defaults to 'relu'.
-            optimizer (OptimizerType, optional): Optimizer function to train the model. Defaults to 'adam'.
-            mc_samples (int, optional): No of monte carlo samples to draw from the optimizing(at validation)/optimied(at inference) posterior. Defaults to 20.
-            custom_architecture (Optional[list[int]], optional): List of integers who's length represents the no of layers and each integer represents the no of models in that layer. Defaults to None.
-            return_metrics (bool, optional): Should the model return evaluated metrics ?. Defaults to True.
-            auto_build (bool, optional): Builts the model automatically after initialization. Defaults to True.
-        """
-        self.model_size = model_size
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.device = device
-        self.hidden_activation = hidden_activation
-        self.optimizer = optimizer
-        self.custom_architecture = custom_architecture
-        self.return_metrics = return_metrics
-        self.auto_build = auto_build
-        self.mc_samples = mc_samples
-        
-        self.__post_init__()
+            Args:
+                model_size (Optional[str]): size of the model - ['small', 'medium', 'large']
+                input_dim (int): input dimension
+                device (DeviceType, optional): Uses this device to train the model. Defaults to 'cuda'.
+                hidden_activation (ActivationType, optional): Neural Net's activation function(same for all layers). Defaults to 'relu'.
+                optimizer (OptimizerType, optional): Optimizer function to train the model. Defaults to 'adam'.
+                mc_samples (int, optional): No of monte carlo samples to draw from the optimizing(at validation)/optimied(at inference) posterior. Defaults to 20.
+                custom_architecture (Optional[list[int]], optional): List of integers who's length represents the no of layers and each integer represents the no of models in that layer. Defaults to None.
+                return_metrics (bool, optional): Should the model return evaluated metrics ?. Defaults to True.
+                auto_build (bool, optional): Builts the model automatically after initialization. Defaults to True.
+            """
+            self.model_size = model_size
+            self.input_dim = input_dim
+            self.device = device
+            self.hidden_activation = hidden_activation
+            self.optimizer = optimizer
+            self.custom_architecture = custom_architecture
+            self.return_metrics = return_metrics
+            self.auto_build = auto_build
+            self.mc_samples = mc_samples
+    
+            self.__post_init__()
 
     def _validate_basic(self) -> None:
         """
@@ -140,12 +127,6 @@ class BnnRegressor:
         if not isinstance(self.input_dim, int):
             raise TypeError(f'Expected input_dim to be an integer, but recieved {type(self.input_dim)}')
 
-        if not isinstance(self.output_dim, int):
-            raise TypeError(f'Expected output_dim to be an integer, but recieved {type(self.output_dim)}')
-        
-        if self.output_dim == 0:
-            raise RuntimeError('output_dim should be atleast 1')
-        
         if not isinstance(self.mc_samples, int):
             raise TypeError(f'Expected mc_samples to be an integer, but recieved {type(self.mc_samples)}')
         
@@ -165,7 +146,7 @@ class BnnRegressor:
         self.custom_architecture =  validate_custom_arch(self.custom_architecture)
         
         if self.return_metrics:
-            self.metrics = get_metrics(task='regression', multiclass=False)
+            self.metrics = get_metrics(task='=classification', multiclass=False)
     
     def _validate_architecture_logic(self) -> None:
         """
@@ -182,31 +163,30 @@ class BnnRegressor:
             )
 
         
-    def summary(self) -> None:
+    def _init_info(self) -> None:
         """
         Print model's initialization summary after creating an instance
         """
         print("Model Configuration:\n")
         print(f"  Model Size:         {self.model_size or 'Custom'}")
         print(f"  Input Dimension:    {self.input_dim}")
-        print(f"  Output Dimension:   {self.output_dim}")
-        print(f"  Loss                Negative ELBO Loss")
+        print(f"  Loss                Negative ELBO Loss (KL(q(w)||p(w)) + BCE)")
         print(f"  Device:             {self.device}")
         print(f"  Hidden Activation:  {self.hidden_activation}")
         print(f"  Optimizer:          {self.optimizer}")
         print(f"  Custom Architecture:{self.custom_architecture}\n")
 
-    def model_info(self) -> None:
+    def summary(self) -> None:
         """
         Prints a clean, table summary of the BNN model.
         """
-        try:
+        if hasattr(self, 'model'):
             model = self.model
-        except AttributeError:
-            raise RuntimeError(f"Model not found, error while building the model")
+        else:
+            raise RuntimeError(f"Model not found, call build function.")
 
         print("\n====================================")
-        print("        Model Summary         ")
+        print("        Model Summary        ")
         print("====================================")
 
         header = f"{'Layer (name)':<30} {'Shape':<20} {'Param #':<10}"
@@ -225,18 +205,8 @@ class BnnRegressor:
         print("-" * len(header))
         print(f"{'Total Parameters:':<30} {total_params:<20}")
         print("====================================\n")
-
-    def __post_init__(self):
-        self._validate_basic()
-        self._validate_model_ingredients()
-        self._validate_architecture_logic()
-        self.summary()
-
-        if self.auto_build:
-            print("Building the model ...")
-            self.build()
-            self.model_info()
-
+    
+    
     def build(self) -> None:
         """
         Build the NN model for the user given specs
@@ -246,15 +216,25 @@ class BnnRegressor:
         
         self.model = NN(hidden_layers=self.custom_architecture or self.ARCHITECTURE_MAP[self.model_size],
                         input_dim=self.input_dim,
-                        output_dim=self.output_dim,
                         activation = get_hidden_act(self.hidden_activation),
                         device = self.device
                         )
         
         if not self.auto_build:
-            self.model_info()
+            self.summary()
+
+    def __post_init__(self):
+        self._validate_basic()
+        self._validate_model_ingredients()
+        self._validate_architecture_logic()
+        self._init_info()
+
+        if self.auto_build:
+            print("Building the model ...")
+            self.build()
+            self.summary()
     
-    def preprocess_user_data(self, X:np.ndarray, y:np.ndarray, val_size:float, test_size:float, batch_size:int) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    def _preprocess_user_data(self, X:np.ndarray, y:np.ndarray, val_size:float, test_size:float, batch_size:int) -> Tuple[DataLoader, DataLoader, DataLoader]:
         """
         Preprocess user's data and return DataLoader instance for train, val, test datasets
         Args:
@@ -271,7 +251,7 @@ class BnnRegressor:
         """
         
         X = X_to_torch(X, input_dim=self.input_dim)
-        y = preprocess_y(y, task='regression', multiclass=False, output_dim=self.output_dim, uncertainty=False)
+        y = preprocess_y(y, task='classification', multiclass=False, output_dim=1, uncertainty=False)
         
         if batch_size > X.shape[0]:
             raise RuntimeError(f'batch_size:{batch_size} is higher than the given samples X:{X.shape[0]}')
@@ -280,19 +260,14 @@ class BnnRegressor:
         
         num_samples = X.shape[0]
         
-        self.X_mean = X.mean(dim=0)
-        self.X_std = X.std(dim=0)
+        if not hasattr(self, 'X_mean'):
+            self.X_mean = X.mean(dim=0)
+            self.X_std = X.std(dim=0)
 
-        self.X_std = torch.where(self.X_std == 0, torch.ones_like(self.X_std), self.X_std)
+            self.X_std = torch.where(self.X_std == 0, torch.ones_like(self.X_std), self.X_std)
 
-        X = (X - self.X_mean) / self.X_std
-        
-        self.y_mean = y.mean(dim = 0)
-        self.y_std = y.std(dim = 0)
-        self.y_std = torch.where(self.y_std == 0, torch.ones_like(self.y_std), self.y_std)
-        
-        y = (y - self.y_mean) / self.y_std
-        
+            X = (X - self.X_mean) / self.X_std
+
         idx = torch.randperm(num_samples)
         n_test = int(num_samples * test_size)
         n_val = int(num_samples * val_size)
@@ -306,7 +281,11 @@ class BnnRegressor:
         X_val, y_val = X[val_idx], y[val_idx]
         X_test, y_test = X[test_idx], y[test_idx]
         
-        self.num_train_samples = X_train.shape[0]
+        num_train_samples = X_train.shape[0]
+        if not num_train_samples:
+            raise RuntimeError(f'Invalid training sample size : {num_train_samples}')
+        else:
+            self.num_train_samples = num_train_samples
 
         train_dataset = TensorDataset(X_train, y_train)
         val_dataset = TensorDataset(X_val, y_val)
@@ -324,8 +303,8 @@ class BnnRegressor:
             raise RuntimeError("Test data is empty. Adjust batch_size, val_size and test_size to ensure test data is available.")
         
         return train_loader, val_loader, test_loader
-    
-    def train(self, X:np.ndarray, y:np.ndarray, epochs:int, learning_rate:float, momentum:Optional[float] = None, val_size:float=0.2, test_size:float=0.1, batch_size:int=32, temp_lr:float=0.01, temp_epochs:int=100):
+
+    def train(self, X:np.ndarray, y:np.ndarray, epochs:int, learning_rate:float, momentum:Optional[float] = None, val_size:float=0.2, test_size:float=0.1, batch_size:int=32, threshold:float = 0.5,temp_lr:float=0.01, temp_epochs:int=100):
         """
         Train's the built model
         Args:
@@ -337,6 +316,7 @@ class BnnRegressor:
             val_size (float, optional): Portion of data used for validation, defaults to 0.2.
             test_size (float, optional): Portion of data used for test, defaults to 0.1.
             batch_size (int, optional): No of samples in each batch, defaults to 32.
+            threshold (float, optional): a threshold(between 0 and 1) to classify the sample as positive or negative for sigmoid.
             temp_lr (float, optional): Learning rate for temperature parameter.
             temp_epochs (int, optional): No of epochs for updating temperature parameter
         """
@@ -370,8 +350,15 @@ class BnnRegressor:
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than 0")
         
+        if not isinstance(threshold, (float, int)):
+            raise ValueError('Expected threshold to be floating point')
+        
+        if not (0<= threshold <= 1):
+            raise ValueError(f'Expected threshold to be between 0 and 1')
+        
         if not isinstance(temp_lr, (float, int)):
             raise ValueError(f'Expected temp_lr be a floating point or an integer, but recieved {type(temp_lr)}')
+        
         if not isinstance(temp_epochs, int):
             raise ValueError(f'Expected temp_epochs to be an integer, but recieved {type(temp_epochs)}')
         
@@ -379,7 +366,10 @@ class BnnRegressor:
             p.requires_grad = True
 
         
-        train_loader, val_loader, test_loader = self.preprocess_user_data(X=X, y=y, val_size=val_size, test_size=test_size, batch_size=batch_size)
+        train_loader, val_loader, test_loader = self._preprocess_user_data(X=X, y=y, val_size=val_size, test_size=test_size, batch_size=batch_size)
+        
+        
+        self.threshold = threshold
         
         kwargs = {
             'lr' : learning_rate,
@@ -396,7 +386,7 @@ class BnnRegressor:
         val_loss_track = []
         
         if self.return_metrics:
-            metrics_tracking = {f'validation_{k}':[] for k in self.metrics.keys()}
+            metrics_tracking = {'validation_Epistemic_AUC':[], **{f'validation_{k}':[] for k in self.metrics.keys()}}            
         
         for epoch in range(epochs):
             self.model.train()
@@ -407,13 +397,13 @@ class BnnRegressor:
                 X_train_batch, y_train_batch = X_train_batch.to(self.device, non_blocking=True), y_train_batch.to(self.device, non_blocking=True)
                 num_samples = X_train_batch.shape[0]
                 
-                y_train_mean, y_train_std = self.model(X = X_train_batch)
+                y_train_pred = self.model(X_train_batch)
                 
-                loss_nll = N_ELBO_NLL(y_pred_mean=y_train_mean, y_pred_std=y_train_std, y_true=y_train_batch)
+                loss_nll = BCE(y_train_pred=y_train_pred, y_true=y_train_batch)
                 
                 kld = 0
                 for i in range(len(self.model.weight_mu)):
-                    kld += N_ELBO_KLD(mu=self.model.weight_mu[i], log_var=self.model.weight_log_var[i]) + N_ELBO_KLD(mu=self.model.bias_mu[i],  log_var=self.model.bias_log_var[i])
+                    kld += N_ELBO_KLD_STD(mu=self.model.weight_mu[i], log_std=self.model.weight_log_std[i]) + N_ELBO_KLD_STD(mu=self.model.bias_mu[i],  log_std=self.model.bias_log_std[i])
                 
                 try:
                     kld_scaled = (kld / self.num_train_samples)
@@ -438,8 +428,9 @@ class BnnRegressor:
             val_samples = 0
             
             if self.return_metrics:
-                total_val_predictions = []
+                total_val_prob_predictions = []
                 total_val_true_values = []
+                total_val_std_predictions = []
 
             with torch.no_grad():
                 for X_val_batch, y_val_batch in val_loader:
@@ -450,55 +441,68 @@ class BnnRegressor:
                     num_samples = X_val_batch.shape[0]
 
                     sampled_mean_pred = []
-                    sampled_std_pred = []
 
                     for _ in range(self.mc_samples):
-                        y_val_mean, y_val_std = self.model(X_val_batch)
-                        sampled_mean_pred.append(y_val_mean)
-                        sampled_std_pred.append(y_val_std)
+                        y_val_pred = self.model(X_val_batch)
+                        sampled_mean_pred.append(y_val_pred)
 
                     mean_stack = torch.stack(sampled_mean_pred)
-                    std_stack = torch.stack(sampled_std_pred)
-
-                    y_val_mean_pred = mean_stack.mean(dim=0)
-
-                    aleatoric_var = torch.clamp((std_stack**2).mean(dim=0), min=1e-6, max=1e3)
-                    epistemic_var = torch.clamp(mean_stack.var(dim=0, unbiased=False), min=0, max=1e3)
-
-                    total_var = aleatoric_var + epistemic_var
-                    y_val_std_pred = torch.sqrt(torch.clamp(total_var, min=1e-6, max=1e3))
+                    y_val_mean_pred = mean_stack.mean(dim=0) # [B, 1] logits
                     
-
-                    loss_val = N_ELBO_NLL(
-                        y_pred_mean=y_val_mean_pred,
-                        y_pred_std=y_val_std_pred,
+                    y_val_prob_pred= torch.sigmoid(y_val_mean_pred).clamp(min=1e-6) # [B, 1] Probs
+                    y_val_var_pred = ((y_val_prob_pred * (1 - y_val_prob_pred))**2)* mean_stack.var(dim=0, unbiased=False)
+                    
+                    y_val_std_pred = torch.sqrt(y_val_var_pred + 1e-12)
+                    
+                    
+                    loss_val = BCE(
+                        y_train_pred=y_val_mean_pred,
                         y_true=y_val_batch
                     )
-
+                    
                     val_loss += loss_val * num_samples
                     val_samples += num_samples
 
                     if self.return_metrics:
-                        total_val_predictions.append(
-                            y_val_mean_pred.detach().cpu().numpy()
+                        total_val_prob_predictions.append(
+                            y_val_prob_pred.detach().cpu().numpy()
                         )
                         total_val_true_values.append(
                             y_val_batch.detach().cpu().numpy()
                         )
+                        total_val_std_predictions.append(
+                            y_val_std_pred.detach().cpu().numpy()
+                        )
 
             if self.return_metrics:
-                total_val_predictions = np.concatenate(total_val_predictions, axis=0)
+                total_val_prob_predictions = np.concatenate(total_val_prob_predictions, axis=0)
                 total_val_true_values = np.concatenate(total_val_true_values, axis=0)
+                total_val_std_predictions = np.concatenate(total_val_std_predictions, axis=0)
+                
 
-                assert total_val_predictions.shape[0] == val_samples
-                assert total_val_true_values.shape == total_val_predictions.shape
+                assert total_val_prob_predictions.shape[0] == val_samples
+                assert total_val_true_values.shape == total_val_prob_predictions.shape
+                assert total_val_std_predictions.shape == total_val_prob_predictions.shape
+                
+                total_val_prob_predictions = np.squeeze(total_val_prob_predictions, axis=1)
+                total_val_true_values = np.squeeze(total_val_true_values, axis=1)
+                total_val_std_predictions = np.squeeze(total_val_std_predictions, axis=1)
+                
+                pred_classes = (total_val_prob_predictions > self.threshold).astype(float)
+
+                binary_errors = np.abs(total_val_true_values - total_val_prob_predictions)
                 
                 for k, fun in self.metrics.items():
                     metrics_tracking[f'validation_{k}'].append(
-                        fun(total_val_true_values, total_val_predictions)
+                        fun(total_val_true_values, pred_classes)
                     )
 
-            
+                metrics_tracking['validation_Epistemic_AUC'].append(
+                    epistemic_auc(
+                        errors=binary_errors,
+                        uncertainties=total_val_std_predictions
+                    )
+                )
             avg_val_loss = val_loss / val_samples
             val_loss_track.append(avg_val_loss.detach().cpu().numpy())
 
@@ -516,59 +520,47 @@ class BnnRegressor:
         X_calib = dataset.tensors[0].to(self.device)
         y_calib = dataset.tensors[1].to(self.device)
 
-        log_T = torch.nn.Parameter(torch.zeros(1, device=self.device))
+        self.log_T = torch.nn.Parameter(torch.zeros(1, device=self.device))
         
-        temp_opt= get_optimizer(optimizer = self.optimizer, lr=temp_lr, params=[log_T], momentum = momentum if momentum is not None else None)
+        temp_opt= get_optimizer(optimizer = self.optimizer, lr=temp_lr, params=[self.log_T], momentum = momentum if momentum is not None else None)
+        loss_fn = torch.nn.BCELoss()
         
         for _ in range(temp_epochs):
 
-            mean_raw, std_raw = self.model(X_calib)
-            mean_raw = mean_raw.detach()
-            std_raw = std_raw.detach()
-
-            T = torch.exp(log_T)
-
-            var_scaled = (std_raw ** 2) * T
-            std_scaled = torch.sqrt(var_scaled)
-
-            loss = N_ELBO_NLL(mean_raw, std_scaled, y_calib)
-
+            pred_raw = self.model(X_calib)
+            T = torch.exp(self.log_T)
+            pred_prob = torch.sigmoid(pred_raw / T)
+            
+            loss = loss_fn(pred_prob, y_calib)
+        
             temp_opt.zero_grad()
             loss.backward()
             temp_opt.step()
 
-        T = torch.exp(log_T.detach())
+        T = torch.exp(self.log_T.detach())
         
         test_loss = 0
         test_samples = 0 
         y_test_mean_pred_track = []
-        y_test_std_pred_track = []
         y_test_true_track = []
+        y_test_std_pred_track = []
+        
         with torch.no_grad():
             for X_test_batch, y_test_batch in test_loader:
-                X_test_batch, y_test_batch = X_test_batch.to(self.device, non_blocking=True), y_test_batch.to(self.device, non_blocking=True)
+                X_test_batch, y_test_batch = X_test_batch.to(self.device), y_test_batch.to(self.device)
                 num_samples = X_test_batch.shape[0]
+
+                y_test_mean_stack = torch.stack([self.model(X_test_batch) for _ in range(self.mc_samples)])
                 
-                y_test_mean_stack = []
-                y_test_std_stack = []
-        
-                for _ in range(self.mc_samples):
-                    y_test_mean_sample, y_test_std_sample = self.model(X_test_batch)
-                    y_test_mean_stack.append(y_test_mean_sample)
-                    y_test_std_stack.append(y_test_std_sample)
+                y_test_mean_stack = y_test_mean_stack / T
                 
-                y_test_mean_stack = torch.stack(y_test_mean_stack)
-                y_test_std_stack  = torch.stack(y_test_std_stack) 
-
-                epistemic_var = y_test_mean_stack.var(dim=0, unbiased=False)
-
-                aleatoric_var = (y_test_std_stack**2).mean(dim=0) * T
-
-                y_test_std_pred = torch.sqrt(aleatoric_var + epistemic_var)
-
-                y_test_mean_pred = y_test_mean_stack.mean(dim=0)
+                y_test_avg_logits = y_test_mean_stack.mean(dim=0) # [N, 1] logits                
+                y_test_mean_pred = torch.sigmoid(y_test_avg_logits).clamp(min=1e-6) # [N, 1] probs
                 
-                loss_test = N_ELBO_NLL(y_test_mean_pred, y_test_std_pred, y_test_batch)
+                y_test_var_pred = ((y_test_mean_pred * (1 - y_test_mean_pred))**2) * y_test_mean_stack.var(dim=0, unbiased=False)
+                y_test_std_pred = torch.sqrt(y_test_var_pred + 1e-12)
+                
+                loss_test = loss_fn(y_test_mean_pred, y_test_batch)
                 
                 test_loss += loss_test * num_samples
                 test_samples += num_samples
@@ -578,41 +570,27 @@ class BnnRegressor:
                 y_test_true_track.append(y_test_batch.detach().cpu().numpy())
             
         print(f"Average Test Loss: {test_loss/test_samples:.2f}")
-        
+                
         y_test_mean_pred_track = np.concatenate(y_test_mean_pred_track, axis=0)
         y_test_std_pred_track = np.concatenate(y_test_std_pred_track, axis=0)
         y_test_true_track = np.concatenate(y_test_true_track, axis=0)
-
+        
+        y_test_mean_pred_track = np.squeeze(y_test_mean_pred_track, axis=1)
+        y_test_std_pred_track = np.squeeze(y_test_std_pred_track, axis=1)
+        y_test_true_track = np.squeeze(y_test_true_track, axis=1)
+        
+        test_classes = (y_test_mean_pred_track > self.threshold).astype(float)
+        test_binary_error = y_test_true_track - y_test_mean_pred_track
+        
         if self.return_metrics:
             test_metrics = {
-                f'test_{metric_name}': func(y_test_true_track, y_test_mean_pred_track)
-                for metric_name, func in self.metrics.items()
+                'test_Epistemic_AUC': epistemic_auc(errors=test_binary_error, uncertainties=y_test_std_pred_track),
+                **{f'test_{metric_name}': func(y_test_true_track, test_classes)
+                for metric_name, func in self.metrics.items()}
     }
 
         
-        picp_values, mpiw_values = PICP_MPIW(y_test_mean_pred_track, y_test_std_pred_track, y_test_true_track)
-
-        print("\n" + "="*70)
-        print("   PICP & MPIW across confidence levels on test data")
-        print("="*70)
-
-        CI = np.linspace(0.10, 0.90, 9)
-        for i, cl in enumerate(CI):
-            p = np.array(picp_values[i])
-            m = np.array(mpiw_values[i])
-            cl_pct = cl * 100
-
-            if p.ndim == 0 or p.size == 1:
-                print(f"{cl_pct:5.0f}% → PICP: {float(p):.4f} │ MPIW: {float(m):.4f}")
-            else:
-                ps = ", ".join(f"{x:.4f}" for x in p)
-                ms = ", ".join(f"{x:.4f}" for x in m)
-                print(f"{cl_pct:5.0f}% → PICP: [{ps}] │ MPIW: [{ms}]")
-        
-        print("="*70)
-        
-        print(f'Calibration Error : {np.mean(np.abs(np.array(picp_values) - CI)):.2f}')
-        
+        print(f'\nExpected Calibration Error : {binary_ece(y_true=y_test_true_track, y_prob=y_test_mean_pred_track):.2f}')        
         
         if self.return_metrics:
             output_dict = TrainingHistory(
@@ -632,25 +610,24 @@ class BnnRegressor:
     def predict(self, X:np.ndarray, mc_samples:int=20) -> Tuple[np.ndarray, np.ndarray]:
         
         """
-        Takes input and predicts the ouput and it's standard-deviation
+        Takes input and predicts the ouput and it's standard-deviation and return ouputs, standard deviation's and their certainity (1 - entropy)
         Args:
         X (np.ndarray): Takes input samples to predict.
         mc_samples (int): Number of samples to sample from the posterior. Default to 20.
         """
         
         if not hasattr(self, 'model'):
-            raise RuntimeError(f'Call build() to build the model before training')
+            raise RuntimeError(f'Call build() to build the training')
         
         X = X_to_torch(X, input_dim=self.input_dim)
         X = (X - self.X_mean) / self.X_std
-        # forgot to use log_T
+        
         X = X.to(self.device)
         
         if not X.shape[0]:
             raise RuntimeError(f"Provided empty data")
         
-        y_pred_stack = []
-        y_std_stack = []
+        y_prob_stack = []
         
         try:
             self.model.eval()
@@ -659,89 +636,86 @@ class BnnRegressor:
         
         with torch.no_grad():
             for _ in range(mc_samples):
-                y_pred, y_std =self.model(X)
-                y_pred_stack.append(y_pred)
-                y_std_stack.append(y_std)
+                y_logits =self.model(X)
+                y_prob_stack.append(y_logits)
+            
+            y_prob_stack = torch.stack(y_prob_stack) / torch.exp(self.log_T.detach())
                 
-            y_pred_stack = torch.stack(y_pred_stack)
-            y_std_stack = torch.stack(y_std_stack)
-            
-            aleatoric_var = (y_std_stack**2).mean(dim=0)
-            epistemic_var = y_pred_stack.var(dim=0, unbiased=False)
-            
-            y_pred_std = torch.sqrt(aleatoric_var + epistemic_var)
-            
-            y_pred = torch.mean(y_pred_stack, dim=0)
-            
-            y_pred = y_pred.detach().cpu().numpy() * self.y_std.numpy() + self.y_mean.numpy()
-            
-            y_pred_std = y_pred_std.detach().cpu().numpy() * self.y_std.numpy()
-        
-        return y_pred, y_pred_std
+            y_prob_avg = torch.sigmoid(y_prob_stack.mean(dim=0))            # [N, 1]
+            y_pred_std = torch.sigmoid(y_prob_stack).std(dim=0, unbiased=False)     # [N, 1]
+
+            y_pred = (y_prob_avg.detach().cpu().numpy().squeeze() > self.threshold).astype(int)
+            y_pred_std = y_pred_std.detach().cpu().numpy().squeeze()
+            y_prob_avg = y_prob_avg.detach().cpu().numpy().squeeze()
+
+            eps = 1e-12
+            entropy = - (y_prob_avg * np.log(y_prob_avg + eps) + (1 - y_prob_avg) * np.log(1 - y_prob_avg + eps)) / np.log(2)
+            certainty = 1 - entropy
+
+        return y_pred, y_pred_std, certainty
     
     def save(self, parameters_path:str, arguments_path:str) -> None:
-        """
-        Upon calling, the method will save the model's parameters and hyperparameters
+            """
+            Upon calling, the method will save the model's parameters and hyperparameters
 
-        Args:
-            parameters_path (str): Path to save the model parameter
-            arguments_path (str): Path to save the model architecture
-        """
-        
-        if not isinstance(parameters_path, str) or len(parameters_path.strip()) == 0:
-            raise ValueError("Path must be a non-empty string.")
+            Args:
+                parameters_path (str): Path to save the model parameter
+                arguments_path (str): Path to save the model architecture
+            """
+            
+            if not isinstance(parameters_path, str) or len(parameters_path.strip()) == 0:
+                raise ValueError("Path must be a non-empty string.")
 
-        if "." not in parameters_path:
-            raise ValueError("Please provide a file name with extension, e.g., 'model_params.pt'")
-        
-        if not isinstance(arguments_path, str) or len(arguments_path.strip()) == 0:
-            raise ValueError("Path must be a non-empty string.")
+            if "." not in parameters_path:
+                raise ValueError("Please provide a file name with extension, e.g., 'model_params.pt'")
+            
+            if not isinstance(arguments_path, str) or len(arguments_path.strip()) == 0:
+                raise ValueError("Path must be a non-empty string.")
 
-        if "." not in arguments_path:
-            raise ValueError("Please provide a file name with extension, e.g., 'model_args.pt'")
+            if "." not in arguments_path:
+                raise ValueError("Please provide a file name with extension, e.g., 'model_args.pt'")
 
-        state_ext = parameters_path.split(".")[-1].lower()
-        arch_ext = arguments_path.split(".")[-1].lower()
+            state_ext = parameters_path.split(".")[-1].lower()
+            arch_ext = arguments_path.split(".")[-1].lower()
 
-        allowed_exts = {"pth", "pt", "ckpt", "bin"}
-        
-        if state_ext not in allowed_exts:
-            print(f"Warning: parameters_path extension '.{state_ext}' is unusual for PyTorch models. "
-                f"Recommended: .pth, .pt, .ckpt")
-        
-        if arch_ext not in allowed_exts:
-            print(f"Warning: arguments_path extension '.{arch_ext}' is unusual for PyTorch models. "
-                f"Recommended: .pth, .pt, .ckpt")
+            allowed_exts = {"pth", "pt", "ckpt", "bin"}
+            
+            if state_ext not in allowed_exts:
+                print(f"Warning: parameters_path extension '.{state_ext}' is unusual for PyTorch models. "
+                    f"Recommended: .pth, .pt, .ckpt")
+            
+            if arch_ext not in allowed_exts:
+                print(f"Warning: arguments_path extension '.{arch_ext}' is unusual for PyTorch models. "
+                    f"Recommended: .pth, .pt, .ckpt")
 
-        if not hasattr(self, "model"):
-            raise RuntimeError("Model not built yet. Call build() or train() before saving.")
+            if not hasattr(self, "model"):
+                raise RuntimeError("Model not built yet. Call build() or train() before saving.")
+            
+            model_args = {
+                "model_size" : self.model_size,
+                "input_dim" : self.input_dim,
+                "device": self.device.type,
+                "hidden_activation" : self.hidden_activation,
+                "optimizer" : self.optimizer,
+                "mc_samples": self.mc_samples,
+                "custom_architecture" : self.custom_architecture,
+                "return_metrics" : self.return_metrics,
+                "auto_build" : self.auto_build,
+                "X_mean" : self.X_mean,
+                "X_std" : self.X_std,
+                "log_T" : self.log_T.detach().cpu(),
+                "threshold" : self.threshold
+            }
+            
+            try:
+                torch.save(self.model.state_dict(), parameters_path)
+                torch.save(model_args, arguments_path)
+            except Exception as e:
+                raise RuntimeError(f"Error saving model: {e}")
+            
+            print(f"Model's state successfully saved to: {parameters_path}")
+            print(f"Model's architecture successfully saved to: {arguments_path}")
         
-        model_args = {
-            "model_size" : self.model_size,
-            "input_dim" : self.input_dim,
-            "output_dim" : self.output_dim,
-            "device": self.device.type,
-            "hidden_activation" : self.hidden_activation,
-            "optimizer" : self.optimizer,
-            "mc_samples": self.mc_samples,
-            "custom_architecture" : self.custom_architecture,
-            "return_metrics" : self.return_metrics,
-            "auto_build" : self.auto_build,
-            "X_mean" : self.X_mean,
-            "X_std" : self.X_std,
-            "y_mean" : self.y_mean,
-            "y_std" : self.y_std
-        }
-        
-        try:
-            torch.save(self.model.state_dict(), parameters_path)
-            torch.save(model_args, arguments_path)
-        except Exception as e:
-            raise RuntimeError(f"Error saving model: {e}")
-         
-        print(f"Model's state successfully saved to: {parameters_path}")
-        print(f"Model's architecture successfully saved to: {arguments_path}")
-    
     @classmethod
     def load(cls, parameters_path:str, arguments_path:str) -> Self:
         """
@@ -752,7 +726,6 @@ class BnnRegressor:
         bnn = cls(
             model_size=args.get('model_size'),
             input_dim=args.get('input_dim'),
-            output_dim=args.get('output_dim'),
             device=args.get('device'),
             hidden_activation=args.get('hidden_activation'),
             optimizer=args.get('optimizer'),
@@ -762,36 +735,11 @@ class BnnRegressor:
             auto_build=True
         )
         
-        
         state_dict = torch.load(parameters_path, map_location=args['device'])
         bnn.model.load_state_dict(state_dict)
         
         bnn.X_mean = args['X_mean']
         bnn.X_std = args['X_std']
-        bnn.y_mean = args['y_mean']
-        bnn.y_std = args['y_std']
+        bnn.log_T = args['log_T'].to(device=args['device'])
+        bnn.threshold = args['threshold']
         return bnn
-        
-        
-    
-        
-        
-        
-        
-        
-        
-            
-            
-            
-            
-
-            
-                
-                
-                                
-        
-        
-        
-        
-
-

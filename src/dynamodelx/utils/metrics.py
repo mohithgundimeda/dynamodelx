@@ -1,6 +1,6 @@
 from sklearn.metrics import (
     mean_absolute_error, r2_score,
-    accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+    accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 )
 import torch
 import numpy as np
@@ -76,3 +76,39 @@ def PICP_MPIW(y_pred:np.ndarray, y_std:np.ndarray | torch.Tensor, y_true:np.ndar
         mpiw_list.append(mpiw)
 
     return picp_list, mpiw_list
+
+def epistemic_auc(errors, uncertainties):
+    
+    errors = np.asarray(errors)
+    uncertainties = np.asarray(uncertainties)
+
+    median_error = np.median(errors)
+    high_error = (errors > median_error).astype(int)
+
+    return roc_auc_score(high_error, uncertainties)
+
+def binary_ece(y_true, y_prob, n_bins=10):
+
+    bin_edges = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+
+    for i in range(n_bins):
+        start = bin_edges[i]
+        end = bin_edges[i+1]
+
+        in_bin = (y_prob >= start) & (y_prob < end)
+        bin_size = np.sum(in_bin)
+
+        if bin_size == 0:
+            continue
+
+        bin_true = y_true[in_bin]
+        bin_prob = y_prob[in_bin]
+
+        accuracy = np.mean(bin_true)
+        confidence = np.mean(bin_prob)
+        weight = bin_size / len(y_true)
+
+        ece += weight * abs(accuracy - confidence)
+
+    return ece

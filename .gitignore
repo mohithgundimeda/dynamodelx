@@ -1,5 +1,5 @@
 dist/
 src/california_housing_args.pt
 src/california_housing_params.pt
-src/dynamodelx/tabular/BNN/breast_cancer_args.pt
-src/dynamodelx/tabular/BNN/breast_cancer_param.pt
+examples/BnnBinaryClassifier/breast_cancer_args.pt
+examples/BnnBinaryClassifier/breast_cancer_param.pt
