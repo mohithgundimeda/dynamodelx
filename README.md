@@ -3,7 +3,7 @@ ___
 
 ## Introduction
 
-__DynaModelX__ stands for Dynamic model extension, it is built as a side project for quick modeling with minimal UI. This package can dynamically build, train and return model performance according to the user given specifications.
+__DynaModelX__ stands for Dynamic model extension, it is built for quick modeling with minimal UI. This package can dynamically build, train and return model performance according to the user given specifications.
 
 To install __DynaModelX__, run
 
@@ -263,10 +263,11 @@ The hyperparameters for the __predict__ method of __BnnRegressor__ are as follow
 
 The predictions returned are as follows:
 * __prediction__ - predicted values.
-* __standard-deviation__ - (epistemic+aleatoric) uncertainty of the predictions.
+* __standard-deviation__ - (epistemic+aleatoric) uncertainty of the prediction.
 
 ## Bayesian Binary Classifier (BnnBinaryClassifier)
 ___
+__BnnBinaryClassifier__ can perform binary classification tasks on tabular data with uncertainty estimation. It is built on top of __pytorch__ to provide a simple interface for training Bayesian Neural Networks using Variational Inference. It provides epistemic uncertainty estimates, which helps to know what the model doesn't know. It also provides certainty estimates based on predictive entropy.
 
 __Note__: __BnnBinaryClassifier__ also learns temperature parameter to calibrate the uncertainty estimates.
 
