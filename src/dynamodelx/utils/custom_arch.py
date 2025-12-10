@@ -14,4 +14,7 @@ def validate_custom_arch(arch: Optional[list[int]]) -> Optional[list[int]]:
     if len(arch) == 0:
         raise ValueError("custom_architecture cannot be an empty list. Provide at least one layer.")
     
+    if 0 in arch:
+        raise ValueError("A layer with 0 neurons can't learn or pass the signal.")
+    
     return arch

@@ -130,6 +130,9 @@ class BnnBinaryClassifier:
         if not isinstance(self.mc_samples, int):
             raise TypeError(f'Expected mc_samples to be an integer, but recieved {type(self.mc_samples)}')
         
+        if self.mc_samples <= 0:
+            raise RuntimeError(f'mc_samples must atleast be 1.')
+        
         if not isinstance(self.return_metrics, bool):
             raise TypeError(f'Expected return_metrics to be either True or False')
         
@@ -260,13 +263,12 @@ class BnnBinaryClassifier:
         
         num_samples = X.shape[0]
         
-        if not hasattr(self, 'X_mean'):
-            self.X_mean = X.mean(dim=0)
-            self.X_std = X.std(dim=0)
+        self.X_mean = X.mean(dim=0)
+        self.X_std = X.std(dim=0)
 
-            self.X_std = torch.where(self.X_std == 0, torch.ones_like(self.X_std), self.X_std)
+        self.X_std = torch.where(self.X_std == 0, torch.ones_like(self.X_std), self.X_std)
 
-            X = (X - self.X_mean) / self.X_std
+        X = (X - self.X_mean) / self.X_std
 
         idx = torch.randperm(num_samples)
         n_test = int(num_samples * test_size)
@@ -447,9 +449,9 @@ class BnnBinaryClassifier:
                         sampled_mean_pred.append(y_val_pred)
 
                     mean_stack = torch.stack(sampled_mean_pred)
-                    y_val_mean_pred = mean_stack.mean(dim=0) # [B, 1] logits
+                    y_val_mean_pred = mean_stack.mean(dim=0)
                     
-                    y_val_prob_pred= torch.sigmoid(y_val_mean_pred).clamp(min=1e-6) # [B, 1] Probs
+                    y_val_prob_pred= torch.sigmoid(y_val_mean_pred).clamp(min=1e-6)
                     y_val_var_pred = ((y_val_prob_pred * (1 - y_val_prob_pred))**2)* mean_stack.var(dim=0, unbiased=False)
                     
                     y_val_std_pred = torch.sqrt(y_val_var_pred + 1e-12)
@@ -488,6 +490,10 @@ class BnnBinaryClassifier:
                 total_val_true_values = np.squeeze(total_val_true_values, axis=1)
                 total_val_std_predictions = np.squeeze(total_val_std_predictions, axis=1)
                 
+                if len(np.unique(total_val_true_values)) < 2:
+                    print("[Warning] Validation set has only one class. Metrics like AUC cannot be computed. "
+                        "Consider providing more data.")
+
                 pred_classes = (total_val_prob_predictions > self.threshold).astype(float)
 
                 binary_errors = np.abs(total_val_true_values - total_val_prob_predictions)
@@ -618,6 +624,8 @@ class BnnBinaryClassifier:
         
         if not hasattr(self, 'model'):
             raise RuntimeError(f'Call build() to build the training')
+        if mc_samples <= 0:
+            raise RuntimeError('model needs atleast 1 mc_sample to predict.')
         
         X = X_to_torch(X, input_dim=self.input_dim)
         X = (X - self.X_mean) / self.X_std
@@ -641,8 +649,8 @@ class BnnBinaryClassifier:
             
             y_prob_stack = torch.stack(y_prob_stack) / torch.exp(self.log_T.detach())
                 
-            y_prob_avg = torch.sigmoid(y_prob_stack.mean(dim=0))            # [N, 1]
-            y_pred_std = torch.sigmoid(y_prob_stack).std(dim=0, unbiased=False)     # [N, 1]
+            y_prob_avg = torch.sigmoid(y_prob_stack.mean(dim=0))
+            y_pred_std = torch.sigmoid(y_prob_stack).std(dim=0, unbiased=False)
 
             y_pred = (y_prob_avg.detach().cpu().numpy().squeeze() > self.threshold).astype(int)
             y_pred_std = y_pred_std.detach().cpu().numpy().squeeze()

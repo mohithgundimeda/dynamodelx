@@ -516,9 +516,9 @@ class BnnRegressor:
         X_calib = dataset.tensors[0].to(self.device)
         y_calib = dataset.tensors[1].to(self.device)
 
-        log_T = torch.nn.Parameter(torch.zeros(1, device=self.device))
+        self.log_T = torch.nn.Parameter(torch.zeros(1, device=self.device))
         
-        temp_opt= get_optimizer(optimizer = self.optimizer, lr=temp_lr, params=[log_T], momentum = momentum if momentum is not None else None)
+        temp_opt= get_optimizer(optimizer = self.optimizer, lr=temp_lr, params=[self.log_T], momentum = momentum if momentum is not None else None)
         
         for _ in range(temp_epochs):
 
@@ -526,7 +526,7 @@ class BnnRegressor:
             mean_raw = mean_raw.detach()
             std_raw = std_raw.detach()
 
-            T = torch.exp(log_T)
+            T = torch.exp(self.log_T)
 
             var_scaled = (std_raw ** 2) * T
             std_scaled = torch.sqrt(var_scaled)
@@ -537,7 +537,7 @@ class BnnRegressor:
             loss.backward()
             temp_opt.step()
 
-        T = torch.exp(log_T.detach())
+        T = torch.exp(self.log_T.detach())
         
         test_loss = 0
         test_samples = 0 
@@ -640,10 +640,12 @@ class BnnRegressor:
         
         if not hasattr(self, 'model'):
             raise RuntimeError(f'Call build() to build the model before training')
+        if mc_samples <= 0:
+            raise RuntimeError('model needs atleast 1 mc_sample to predict.')
+        
         
         X = X_to_torch(X, input_dim=self.input_dim)
         X = (X - self.X_mean) / self.X_std
-        # forgot to use log_T
         X = X.to(self.device)
         
         if not X.shape[0]:
@@ -666,7 +668,7 @@ class BnnRegressor:
             y_pred_stack = torch.stack(y_pred_stack)
             y_std_stack = torch.stack(y_std_stack)
             
-            aleatoric_var = (y_std_stack**2).mean(dim=0)
+            aleatoric_var = (y_std_stack**2).mean(dim=0) * torch.exp(self.log_T)
             epistemic_var = y_pred_stack.var(dim=0, unbiased=False)
             
             y_pred_std = torch.sqrt(aleatoric_var + epistemic_var)
@@ -730,7 +732,8 @@ class BnnRegressor:
             "X_mean" : self.X_mean,
             "X_std" : self.X_std,
             "y_mean" : self.y_mean,
-            "y_std" : self.y_std
+            "y_std" : self.y_std,
+            "log_T" : self.log_T.detach().cpu()
         }
         
         try:
@@ -770,6 +773,7 @@ class BnnRegressor:
         bnn.X_std = args['X_std']
         bnn.y_mean = args['y_mean']
         bnn.y_std = args['y_std']
+        bnn.log_T = args['log_T'].to(device=args['device'])
         return bnn
         
         

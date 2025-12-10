@@ -14,6 +14,7 @@ pip install dynamodelx
 DynaModelX contains:
 1. __UFA__ - Universal Function Approximator for tabular data.
 2. __BnnRegressor__ - Bayesian Neural Network Regressor for tabular data.
+3. __BnnBinaryClassifier__ - Bayesian Neural Network Binary Classifier for tabular data.
 
 
 ## Universal Function Approximator (UFA)
@@ -236,7 +237,7 @@ The hyperparameters for this estimator to initialize __BnnRegressor__ are as fol
     * **'adamw'** - AdamW optimizer.
     * **'sgd'** - Stochastic Gradient Descent optimizer.
     * By default, it's set to **'adam'**.
-* **mc_samples** takes an integer, number of Monte Carlo samples to estimate the predictive distribution on validation data. By default, it's set to 10.
+* **mc_samples** takes an integer, number of Monte Carlo samples to estimate the predictive distribution on validation data. By default, it's set to 20.
 * **custom_architecture** takes a list of integers, representing the number of neurons in each hidden layer. For example, [128, 64, 32] represents a model with 3 hidden layers with 128, 64 and 32 neurons respectively. By default, it's set to __None__. If it's set to None, the model will be built according to the **model_size** parameter. If we want to use our own custom architecture, we need to set the **model_size** parameter to __None__ and provide the architecture through this parameter. Note this is only for hidden layers and the length of the list should be at least 1 and all the values should be positive integers greater than 0. The output layer neurons are defined by the **output_dim** parameter, no need to mention it here.
 * **return_metrics** takes a boolean value, True if we want to return performance metrics after training, False otherwise. By default, it's set to True. If it's set to True, the __train__ method will return a dictionary of type **TrainingHistory** containing training loss, validation and test losses and their metrics.
 * **auto_build** takes a boolean value, True if we want to automatically build the model after initialization, False otherwise. By default, it's set to True. If it's set to False, we need to manually call the __build__ methods after initialization to build the model.
@@ -256,26 +257,152 @@ __metrics__ returned after training for regression task are as follows:
 * Mean Absolute Error (MAE) on validation and test data.
 * R2 Score on validation and test data.
 
+The hyperparameters for the __predict__ method of __BnnRegressor__ are as follows:
+* __X__ is the feature matrix for which we want to make predictions.
+* __mcsamples__ takes an integer, number of Monte Carlo samples to estimate the predictive distribution. By default, it's set to 20.
 
+The predictions returned are as follows:
+* __prediction__ - predicted values.
+* __standard-deviation__ - (epistemic+aleatoric) uncertainty of the predictions.
+
+## Bayesian Binary Classifier (BnnBinaryClassifier)
+___
+
+__Note__: __BnnBinaryClassifier__ also learns temperature parameter to calibrate the uncertainty estimates.
+
+### Importing The Estimator
+To use __BnnBinaryClassifier__, import the estimator from dynamodelx
+
+```python
+from dynamodelx import BnnBinaryClassifier
+```
+### Using BnnBinaryClassifier
+For Binary Classification with Uncertainty,
+
+```python
+from dynamodelx import BnnBinaryClassifier
+from dynamodelx.plots import draw_plots
+from sklearn.datasets import load_breast_cancer
+X, y = load_breast_cancer(return_X_y=True)
+
+classifier = BnnBinaryClassifier(
+                model_size = 'small',
+                input_dim = X.shape[1],
+                device = 'cuda',
+                hidden_activation = 'relu',
+                optimizer = 'adam',
+                mc_samples = 20,
+                custom_architecture = None,
+                return_metrics = True,
+                auto_build  = True
+)
+
+performance = classifier.train(
+                                X=X,
+                                y=y,
+                                epochs=60,
+                                learning_rate=0.01,
+                                momentum=None,
+                                val_size=0.2,
+                                test_size=0.2,
+                                batch_size=32,
+                                threshold=0.7,
+                                temp_lr=0.01,
+                                temp_epochs=100
+                            )
+draw_plots(performance)
+label, epistemic_std, certainty = classifier.predict(X[:1])
+classifier.save(parameters_path='breast_cancer_param.pt', arguments_path='breast_cancer_args.pt')
+classifier = BnnBinaryClassifier.load(parameters_path='breast_cancer_param.pt', arguments_path='breast_cancer_args.pt')
+```
+
+__Functions__ in __BnnBinaryClassifier__:
+* __build__ - to build the model architecture according to the user specifications.
+* __train__ - to train the model on the given dataset.
+* __predict__ - to make predictions on new data. Returns prediction, epistemic-uncertainty and certainty(1 - entropy).
+* __save__ - to save the trained model to the disk.
+* __load__ - to load a saved model from the disk.
+
+The hyperparameters for this estimator to initialize __BnnRegressor__ are as follows:
+* **model_size** represents the size of the model, it takes one of these values:
+    * __'small'__ - contains 2 hidden layers. 64 and 32 neurons respectively.
+    * __'medium'__ - contains 3 hidden layers. 128, 64 and 32 neurons respectively.
+    * __'large'__ - contains 4 layers. 256, 128, 64 and 32 neurons respectively.
+    * __None__ - when we want to use our very own custom architecture, note the **model_size** should be __None__ if **custom_architecture** is given.(By default, **custom_architecture** is __None__. More about it discussed below)
+* **input_dim** - takes an integer, the feature-space of data.
+* **device** takes any of these strings:
+    * **'cpu'** - model uses cpu to train.
+    * **'cuda or 'cuda:n'** - model uses cuda to train if it's available, where n is the gpu index.
+    * By default, it's set to **'cuda'**.
+* **hidden_activation** takes any of these strings:
+    * **'relu'** - Rectified Linear Unit activation.
+    * **'leaky_relu'** - Leaky Rectified Linear Unit activation.
+    * **'prelu'** - Parametric Rectified Linear Unit activation.
+    * **'elu'** - Exponential Linear Unit activation.
+    * **'sigmoid'** - Sigmoid activation.
+    * **'tanh'** - Hyperbolic Tangent activation.
+    * **'gelu'** - Gaussian Error Linear Unit activation.
+    * **'mish'** - Mish activation.
+    * By default, it's set to **'relu'**.
+* **optimizer** takes any of these strings:
+    * **'adam'** - Adam optimizer.
+    * **'adamw'** - AdamW optimizer.
+    * **'sgd'** - Stochastic Gradient Descent optimizer.
+    * By default, it's set to **'adam'**.
+* **mc_samples** takes an integer, number of Monte Carlo samples to estimate the predictive distribution on validation data. By default, it's set to 20.
+* **custom_architecture** takes a list of integers, representing the number of neurons in each hidden layer. For example, [128, 64, 32] represents a model with 3 hidden layers with 128, 64 and 32 neurons respectively. By default, it's set to __None__. If it's set to None, the model will be built according to the **model_size** parameter. If we want to use our own custom architecture, we need to set the **model_size** parameter to __None__ and provide the architecture through this parameter. Note this is only for hidden layers and the length of the list should be at least 1 and all the values should be positive integers greater than 0. The output layer neurons are defined by the **output_dim** parameter, no need to mention it here.
+* **return_metrics** takes a boolean value, True if we want to return performance metrics after training, False otherwise. By default, it's set to True. If it's set to True, the __train__ method will return a dictionary of type **TrainingHistory** containing training loss, validation and test losses and their metrics.
+* **auto_build** takes a boolean value, True if we want to automatically build the model after initialization, False otherwise. By default, it's set to True. If it's set to False, we need to manually call the __build__ methods after initialization to build the model.
+
+The hyperparameters for the __train__ method of __BnnRegressor__ are as follows:
+* __X__ and __y__ are the feature matrix and target vector respectively.
+* **epochs** takes an integer, number of epochs to train the model.
+* **learning_rate** takes a float value, learning rate for the optimizer.
+* **momentum** takes a float value between 0 and 1, momentum for the SGD optimizer. By default, it's set to **None**. This parameter is used only when the **optimizer** is set to __'sgd'__. Model ignores this parameter if the optimizer is not __'sgd'__.
+* **val_size** takes a float value between 0 and 1, representing the proportion of validation data from the whole dataset. By default, it's set to 0.2.
+* **test_size** takes a float value between 0 and 1, representing the proportion of test data from the whole dataset. By default, it's set to 0.1.
+* **batch_size** takes an integer, number of samples per batch. By default, it's set to 32.
+* **threshold** takes a float value between 0 and 1, classification threshold to classify the samples. By default, it's set to 0.5.
+* **temp_lr** takes a float value, learning rate for temperature parameter optimization. By default, it's set to 0.01.(Same optimizer as main model optimizer is used for temperature parameter optimization)
+* **temp_epochs** takes an integer, number of epochs to optimize the temperature parameter after main model training. By default, it's set to 100.
+
+__metrics__ returned after training for regression task are as follows:
+* Loss on validation and test data.
+* Epistemic AUC on validation and test data.(Correlation between epistemic uncertainty and misclassifications, If the correlation is high, it means the model is better at knowing what it doesn't know)
+* Accuracy on validation and test data.
+* Precision on validation and test data.
+* Recall on validation and test data.
+* F1 Score on validation and test data.
+
+The hyperparameters for the __predict__ method of __BnnBinaryClassifier__ are as follows:
+* __X__ is the feature matrix for which we want to make predictions.
+* __mcsamples__ takes an integer, number of Monte Carlo samples to estimate the predictive distribution. By default, it's set to 20.
+
+The predictions returned are as follows:
+* __label__ - predicted class labels (0 or 1) based on the classification threshold.
+* __epistemic_std__ - epistemic uncertainty (standard deviation) of the predictions.
+* __certainty__ - certainty of the predictions calculated as (1 - entropy).
 
 ## Saving The Model
-To save the trained model, use the __save__ method of __UFA__ and __BnnRegressor__.
+To save the trained model, use the __save__ method of __UFA__, __BnnRegressor__ and __BnnBinaryClassifier__.
 
 ```python
 ufa.save(parameters_path='ufa_model.pt', arguments_path='ufa_args.pt')
 bnn.save(parameters_path='bnn_model.pt', arguments_path='bnn_args.pt')
+classifier.save(parameters_path='bnn_classifier_params.pt', arguments_path='bnn_classifier_args.pt')
 ```
 This method takes the file names (with .pth, .pt, .ckpt, .bin extensions) as input and saves the trained model in the current working directory.
 __parameters_path__ is the file name to save the model parameters (state_dict) and __arguments_path__ is the file name to save the model initialization arguments.
 
 ## Loading The Model
-To load a saved model, use the __load__ method of __UFA__ and __BnnRegressor__.
+To load a saved model, use the __load__ method of __UFA__, __BnnRegressor__ and __BnnBinaryClassifier__.
 
 ```python
 from dynamodelx import UFA, BnnRegressor
 
 ufa = UFA.load(parameters_path='ufa_model.pt', arguments_path='ufa_args.pt')
 bnn = BnnRegressor.load(parameters_path='bnn_model.pt', arguments_path='bnn_args.pt')
+classifier = BnnBinaryClassifier.load(parameters_path='bnn_classifier_params.pt', arguments_path='bnn_classifier_args.pt')
 ```
 This method takes the file names (with .pth, .pt, .ckpt, .bin extensions) as input and loads the saved model from the current working directory.
 __parameters_path__ is the file name to load the model parameters (state_dict) and __arguments_path__ is the file name to load the model initialization arguments.
